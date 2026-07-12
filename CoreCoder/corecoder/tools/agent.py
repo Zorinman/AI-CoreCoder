@@ -8,7 +8,12 @@ its own context window.
 The sub-agent runs to completion and returns a text summary.
 """
 
+from typing import TYPE_CHECKING
+
 from .base import Tool
+
+if TYPE_CHECKING:
+    from ..agent import Agent
 
 
 class AgentTool(Tool):
@@ -31,7 +36,7 @@ class AgentTool(Tool):
     }
 
     # set by Agent.__init__ after construction
-    _parent_agent = None
+    _parent_agent: "Agent | None" = None
 
     def execute(self, task: str) -> str:
         if self._parent_agent is None:
