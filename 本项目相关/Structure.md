@@ -1,0 +1,618 @@
+# CoreCoder 自定义数据结构
+
+本文整理项目定义的 `class`、`@dataclass`，以及在多个模块之间传递或长期保存的关键 `dict`、`list`、`set`。不包含 Python 标准库和第三方库本身的类型，例如 `Path`、`OpenAI`、`Console`。
+
+## 总览
+
+```text
+Config -> LLM / LiteLLM -> Agent
+                         |-> messages: list[dict]
+                         |-> ContextManager
+                         |-> Tool 列表
+
+LLM.chat() -> LLMResponse -> ToolCall[] -> Tool.execute()
+                                      -> 工具结果写回 messages
+```
+
+| 分类             | 结构                                                                                                     |
+| ---------------- | -------------------------------------------------------------------------------------------------------- |
+| 配置与模型通信   | `Config`、`ToolCall`、`LLMResponse`、`LLM`、`LiteLLM`                                                    |
+| Agent 运行状态   | `Agent`、`ContextManager`、消息字典、会话 JSON                                                           |
+| 工具体系         | `Tool`、`BashTool`、`ReadFileTool`、`WriteFileTool`、`EditFileTool`、`GlobTool`、`GrepTool`、`AgentTool` |
+| 共享注册表与状态 | `ALL_TOOLS`、`_tool_by_name`、`_changed_files`、`_local`、`_PRICING` 等                                  |
+
+## 一、配置与模型通信
+
+### 1. `Config`
+
+定义位置：[config.py](../CoreCoder/corecoder/config.py)。这是一个 `@dataclass`，集中保存启动配置。
+
+| 字段                 | 类型    | 作用                               |
+| -------------------- | ------- | ---------------------------------- |
+| `model`              | `str`   | 模型名，默认 `gpt-5.5`             |
+| `api_key`            | `str`   | API Key                            |
+| `base_url`           | `str    | None`                              | OpenAI 兼容接口地址 |
+| `max_tokens`         | `int`   | 单次模型输出上限                   |
+| `temperature`        | `float` | 模型采样温度                       |
+| `max_context_tokens` | `int`   | Agent 上下文上限                   |
+| `provider`           | `str`   | 后端类型，如 `openai` 或 `litellm` |
+
+`Config.from_env()` 从 `.env` 和环境变量创建它。CLI 参数会在创建 `LLM` 前覆盖对应字段。
+
+### 2. `ToolCall`
+
+定义位置：[llm.py](../CoreCoder/corecoder/llm.py)。这是模型请求调用工具时的一条结构化记录。
+
+```python
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict
+```
+
+- `id`：本次工具调用的唯一标识，工具返回结果时必须使用同一个 ID。
+- `name`：工具名，例如 `read_file`、`bash`。
+- `arguments`：工具参数字典，例如 `{"file_path": "main.py"}`。
+
+它将不同模型供应商返回的工具调用，统一为项目内部格式。
+
+### 3. `LLMResponse`
+
+定义位置：[llm.py](../CoreCoder/corecoder/llm.py)。这是 `LLM.chat()` 的统一返回值。
+
+| 字段                | 作用                                     |
+| ------------------- | ---------------------------------------- |
+| `content`           | 模型生成的普通文本                       |
+| `tool_calls`        | `list[ToolCall]`，模型希望执行的工具调用 |
+| `prompt_tokens`     | 本次请求输入 Token 数                    |
+| `completion_tokens` | 本次请求输出 Token 数                    |
+
+`tool_calls` 使用 `field(default_factory=list)`，保证每个响应对象都有独立的空列表。
+
+它的 `message` 属性会将自身转为 OpenAI 格式的 assistant 消息字典，供 `Agent.messages` 保存。
+
+### 4. `LLM` 与 `LiteLLM`
+
+定义位置：[llm.py](../CoreCoder/corecoder/llm.py)。它们是“模型客户端对象”，不仅存数据，也封装请求、流式解析、重试与 Token 累计逻辑。
+
+| 结构      | 继承关系       | 作用                                  |
+| --------- | -------------- | ------------------------------------- |
+| `LLM`     | 无             | 使用 OpenAI SDK 调用 OpenAI 兼容接口  |
+| `LiteLLM` | `LiteLLM(LLM)` | 使用 LiteLLM 调用非 OpenAI 兼容供应商 |
+
+两者对外都提供 `chat(messages, tools, on_token)`，并都返回 `LLMResponse`。因此 `Agent` 不需要区分具体供应商。
+
+它们主要保存：模型名、额外请求配置、累计输入 Token、累计输出 Token；`LLM` 还保存 OpenAI 客户端，`LiteLLM` 保存 API Key 和 Base URL。
+
+## 二、Agent 运行状态与持久化数据
+
+### 1. `Agent`
+
+定义位置：[agent.py](../CoreCoder/corecoder/agent.py)。这是项目的核心协调对象，负责模型、工具和对话状态之间的调度。
+
+| 属性            | 作用                                                    |
+| --------------- | ------------------------------------------------------- |
+| `llm`           | 一个 `LLM` 或 `LiteLLM` 对象                            |
+| `tools`         | 可用的 `Tool` 对象列表，默认使用 `ALL_TOOLS`            |
+| `_tool_by_name` | `dict[str, Tool]`，将工具名映射到工具对象，便于快速查找 |
+| `messages`      | `list[dict]`，当前对话历史，不含系统提示词              |
+| `context`       | `ContextManager`，负责压缩历史                          |
+| `max_rounds`    | 单次用户提问最多允许的“模型 -> 工具”循环次数            |
+| `_system`       | 根据当前工具列表生成的系统提示词                        |
+
+`Agent.chat()` 的逻辑是：追加用户消息 -> 请求模型 -> 若有 `ToolCall` 则执行工具并追加工具结果 -> 再请求模型 -> 返回最终文本。
+
+### 2. 消息字典 `messages: list[dict]`
+
+项目没有为消息单独定义 `Message` 类，而是直接使用符合 OpenAI 协议的字典。这是项目最重要的无类数据结构。
+
+| 消息类型     | 常见字段                                  | 作用                       |
+| ------------ | ----------------------------------------- | -------------------------- |
+| 用户消息     | `role: "user"`、`content`                 | 用户输入                   |
+| 模型文本消息 | `role: "assistant"`、`content`            | 模型最终回复               |
+| 模型工具请求 | `role: "assistant"`、`tool_calls`         | 模型要求调用一个或多个工具 |
+| 工具结果消息 | `role: "tool"`、`tool_call_id`、`content` | 对应某个工具调用的执行结果 |
+
+工具结果的 `tool_call_id` 必须对应前面的 `ToolCall.id`。缺失结果会使消息历史不符合 API 协议，导致下一次请求失败。
+
+### 3. `ContextManager`
+
+定义位置：[context.py](../CoreCoder/corecoder/context.py)。它管理 `messages` 的大小，避免上下文超过模型限制。
+
+| 属性            | 作用                           |
+| --------------- | ------------------------------ |
+| `max_tokens`    | 上下文 Token 上限              |
+| `_snip_at`      | 50% 阈值，截短过长的工具输出   |
+| `_summarize_at` | 70% 阈值，调用模型总结旧消息   |
+| `_collapse_at`  | 90% 阈值，仅保留摘要和最近消息 |
+
+`maybe_compress(messages, llm)` 会直接修改传入的消息列表。压缩时会避开“工具结果与发起该调用的 assistant 消息”之间的边界，防止产生孤立的工具结果。
+
+### 4. 会话 JSON
+
+定义位置：[session.py](../CoreCoder/corecoder/session.py)。会话没有对应类，而是保存为 JSON 字典：
+
+```json
+{
+  "id": "session_...",
+  "model": "gpt-5.5",
+  "saved_at": "2026-07-21 18:00:00",
+  "messages": []
+}
+```
+
+`save_session()` 将 `messages` 和模型名写入 `~/.corecoder/sessions`；`load_session()` 返回 `(messages, model)` 元组。会话 ID 会先规范化，再确认目标路径仍位于会话目录内。
+
+## 三、工具体系
+
+### 1. `Tool` 抽象基类
+
+定义位置：[tools/base.py](../CoreCoder/corecoder/tools/base.py)。`Tool` 是所有工具的统一接口，不直接完成具体工作。
+
+每个子类必须提供：
+
+| 成员                | 作用                         |
+| ------------------- | ---------------------------- |
+| `name`              | 给模型使用的工具名           |
+| `description`       | 告诉模型工具能做什么         |
+| `parameters`        | JSON Schema 格式的参数定义   |
+| `execute(**kwargs)` | 实际执行功能并返回字符串结果 |
+
+`schema()` 会把前三项包装为 OpenAI function calling 所需的字典。`Tool` 继承 Python 标准库的 `ABC`，`@abstractmethod` 保证子类必须实现 `execute()`。
+
+### 2. 具体工具类
+
+以下 7 个类都继承 `Tool`，因此 `Agent` 可以以同一种方式调用它们。
+
+| 类              | 工具名       | 作用                                                       |
+| --------------- | ------------ | ---------------------------------------------------------- |
+| `BashTool`      | `bash`       | 执行 Shell 命令，检测部分危险命令、限制超时并截断过长输出  |
+| `ReadFileTool`  | `read_file`  | 按行读取文本文件，支持起始行和最大行数                     |
+| `WriteFileTool` | `write_file` | 创建文件或完整覆盖文件内容                                 |
+| `EditFileTool`  | `edit_file`  | 用唯一的 `old_string` 精确替换为 `new_string`，并返回 diff |
+| `GlobTool`      | `glob`       | 按 glob 模式查找文件，最多返回 100 个结果                  |
+| `GrepTool`      | `grep`       | 用正则搜索文件内容，跳过常见无关目录                       |
+| `AgentTool`     | `agent`      | 创建独立上下文的子 Agent，完成子任务后返回摘要             |
+
+`AgentTool` 比其他工具多一个 `_parent_agent` 引用。主 `Agent` 初始化时会注入自己；子 Agent 会复用父模型，但移除 `agent` 工具以禁止递归派生。
+
+## 四、共享注册表与辅助状态
+
+这些结构不是类，但承载了多个对象共享的状态或规则。
+
+| 结构                  | 类型               | 定义位置            | 作用                                                      |
+| --------------------- | ------------------ | ------------------- | --------------------------------------------------------- |
+| `ALL_TOOLS`           | `list[Tool]`       | `tools/__init__.py` | 默认工具实例注册表，`Agent` 未传入工具时使用它            |
+| `_tool_by_name`       | `dict[str, Tool]`  | `Agent` 实例        | 由 `ALL_TOOLS` 或传入工具列表构建，按名称定位工具         |
+| `_changed_files`      | `set[str]`         | `tools/edit.py`     | 本次进程内被写入或编辑过的文件路径，供 `/diff` 显示       |
+| `_local`              | `threading.local`  | `tools/bash.py`     | 每个线程独立保存 Shell 当前目录，避免并行命令互相覆盖目录 |
+| `_PRICING`            | `dict[str, tuple]` | `llm.py`            | 模型名到“每百万输入/输出 Token 单价”的映射，用于成本估算  |
+| `_DANGEROUS_PATTERNS` | `list[tuple]`      | `tools/bash.py`     | 正则表达式与风险说明的列表，用于拒绝部分高危 Shell 命令   |
+| `_SKIP_DIRS`          | `set[str]`         | `tools/grep.py`     | `grep` 递归搜索时忽略的目录名集合                         |
+| `SESSIONS_DIR`        | `Path`             | `session.py`        | 会话 JSON 的固定存储目录                                  |
+
+### 关系总结
+
+1. `Config` 决定创建哪种 `LLM`。
+2. `Agent` 持有 `LLM`、`ContextManager`、工具列表和消息列表。
+3. `LLM` 将供应商流式响应解析为 `LLMResponse`；其中的 `ToolCall` 指向某个 `Tool`。
+4. `Agent` 通过 `_tool_by_name` 找到工具，执行后把工具结果字典写回 `messages`。
+5. `ContextManager` 在需要时压缩同一个 `messages` 列表；会话功能将该列表持久化为 JSON。
+
+## 五、数据结构定义源码
+
+本节列出结构定义所需的字段、继承关系、构造函数与工具参数 Schema。`execute()`、`chat()` 等方法的具体执行算法不属于数据结构定义，因此只保留方法签名；完整实现可通过每个小节的源码链接查看。
+
+### 1. 数据类
+
+来源：[config.py](../CoreCoder/corecoder/config.py) 与 [llm.py](../CoreCoder/corecoder/llm.py)。
+
+```python
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Config:
+    model: str = "gpt-5.5"
+    api_key: str = ""
+    base_url: str | None = None
+    max_tokens: int = 4096
+    temperature: float = 0.0
+    max_context_tokens: int = 128_000
+    provider: str = "openai"
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict
+
+
+@dataclass
+class LLMResponse:
+    content: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+```
+
+### 2. 运行协调对象的构造函数
+
+来源：[llm.py](../CoreCoder/corecoder/llm.py)、[agent.py](../CoreCoder/corecoder/agent.py)、[context.py](../CoreCoder/corecoder/context.py)。
+
+```python
+class LLM:
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        base_url: str | None = None,
+        **kwargs,
+    ):
+        self.model = model
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.extra = kwargs
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+
+    def chat(self, messages: list[dict], tools: list[dict] | None = None, on_token=None) -> LLMResponse:
+        ...
+
+
+class LiteLLM(LLM):
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs,
+    ):
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url
+        self.extra = kwargs
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+
+
+class ContextManager:
+    def __init__(self, max_tokens: int = 128_000):
+        self.max_tokens = max_tokens
+        self._snip_at = int(max_tokens * 0.50)
+        self._summarize_at = int(max_tokens * 0.70)
+        self._collapse_at = int(max_tokens * 0.90)
+
+
+class Agent:
+    def __init__(
+        self,
+        llm: LLM,
+        tools: list[Tool] | None = None,
+        max_context_tokens: int = 128_000,
+        max_rounds: int = 50,
+    ):
+        self.llm = llm
+        self.tools = tools if tools is not None else ALL_TOOLS
+        self._tool_by_name = {t.name: t for t in self.tools}
+        self.messages: list[dict] = []
+        self.context = ContextManager(max_tokens=max_context_tokens)
+        self.max_rounds = max_rounds
+        self._system = system_prompt(self.tools)
+```
+
+`Agent.__init__()` 后面还会遍历 `self.tools`，为每个 `AgentTool` 写入 `_parent_agent`。这部分是对象关联逻辑，不新增 `Agent` 自身字段。
+
+### 3. `Tool` 基类定义
+
+来源：[tools/base.py](../CoreCoder/corecoder/tools/base.py)。
+
+```python
+from abc import ABC, abstractmethod
+
+
+class Tool(ABC):
+    name: str
+    description: str
+    parameters: dict
+
+    @abstractmethod
+    def execute(self, **kwargs) -> str:
+        ...
+
+    def schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            },
+        }
+```
+
+### 4. 具体工具类的定义
+
+以下代码保留每个工具的类名、继承关系、工具名、参数 Schema 和 `execute()` 签名。方法体省略；它们分别位于 [`tools/`](../CoreCoder/corecoder/tools) 目录。
+
+```python
+class BashTool(Tool):
+    name = "bash"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "The shell command to run"},
+            "timeout": {"type": "integer", "description": "Timeout in seconds (default 120)"},
+        },
+        "required": ["command"],
+    }
+
+    def execute(self, command: str, timeout: int = 120) -> str:
+        ...
+
+
+class ReadFileTool(Tool):
+    name = "read_file"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "file_path": {"type": "string", "description": "Path to the file"},
+            "offset": {"type": "integer", "description": "Start line (1-based). Default 1."},
+            "limit": {"type": "integer", "description": "Max lines to read. Default 2000."},
+        },
+        "required": ["file_path"],
+    }
+
+    def execute(self, file_path: str, offset: int = 1, limit: int = 2000) -> str:
+        ...
+
+
+class WriteFileTool(Tool):
+    name = "write_file"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "file_path": {"type": "string", "description": "Path for the file"},
+            "content": {"type": "string", "description": "Full file content to write"},
+        },
+        "required": ["file_path", "content"],
+    }
+
+    def execute(self, file_path: str, content: str) -> str:
+        ...
+
+
+class EditFileTool(Tool):
+    name = "edit_file"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "file_path": {"type": "string", "description": "Path to the file to edit"},
+            "old_string": {"type": "string", "description": "Exact text to find (must be unique in file)"},
+            "new_string": {"type": "string", "description": "Replacement text"},
+        },
+        "required": ["file_path", "old_string", "new_string"],
+    }
+
+    def execute(self, file_path: str, old_string: str, new_string: str) -> str:
+        ...
+
+
+class GlobTool(Tool):
+    name = "glob"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "Glob pattern, e.g. '**/*.py' or 'src/**/*.ts'"},
+            "path": {"type": "string", "description": "Directory to search in (default: cwd)"},
+        },
+        "required": ["pattern"],
+    }
+
+    def execute(self, pattern: str, path: str = ".") -> str:
+        ...
+
+
+class GrepTool(Tool):
+    name = "grep"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "Regex pattern to search for"},
+            "path": {"type": "string", "description": "File or directory to search (default: cwd)"},
+            "include": {"type": "string", "description": "Only search files matching this glob (e.g. '*.py')"},
+        },
+        "required": ["pattern"],
+    }
+
+    def execute(self, pattern: str, path: str = ".", include: str | None = None) -> str:
+        ...
+
+
+class AgentTool(Tool):
+    name = "agent"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "task": {"type": "string", "description": "What the sub-agent should accomplish"},
+        },
+        "required": ["task"],
+    }
+    _parent_agent: "Agent | None" = None
+
+    def execute(self, task: str) -> str:
+        ...
+```
+
+所有具体工具还有 `description` 类属性。为避免与前面的功能表重复，未在此重复列出；`Tool.schema()` 会把 `name`、`description`、`parameters` 一起发送给模型。
+
+### 5. 无类数据结构的源码定义
+
+来源：[tools/__init__.py](../CoreCoder/corecoder/tools/__init__.py)、[tools/edit.py](../CoreCoder/corecoder/tools/edit.py)、[tools/bash.py](../CoreCoder/corecoder/tools/bash.py)、[tools/grep.py](../CoreCoder/corecoder/tools/grep.py)、[llm.py](../CoreCoder/corecoder/llm.py)。
+
+```python
+ALL_TOOLS = [
+    BashTool(),
+    ReadFileTool(),
+    WriteFileTool(),
+    EditFileTool(),
+    GlobTool(),
+    GrepTool(),
+    AgentTool(),
+]
+
+_changed_files: set[str] = set()
+_local = threading.local()
+
+_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", "dist", "build"}
+
+_PRICING = {
+    "gpt-5.5": (5, 30),
+    # 其余模型价格映射见 llm.py
+}
+```
+
+`_DANGEROUS_PATTERNS` 也是列表结构，元素形如 `(正则表达式, 风险说明)`；完整规则直接见 [bash.py](../CoreCoder/corecoder/tools/bash.py)。
+
+# CoreCoder 调用路径图
+
+## 1. 整体架构图
+
+```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart LR
+    U["用户"] --> CLI["CLI"]
+    CLI --> A["Agent"]
+    A --> LLM["LLM 抽象层"]
+    LLM -->|OpenAI| OAI["OpenAI 兼容接口"]
+    LLM -->|LiteLLM| LITE["LiteLLM 接口"]
+    OAI --> RESP["LLMResponse"]
+    LITE --> RESP
+    RESP --> A
+    A -->|需要工具| TOOLS["Tool 集合"]
+    TOOLS -->|工具结果| A
+    A -->|最终文本| CLI
+    CLI --> U
+```
+
+| 节点            | 功能                                            |
+| --------------- | ----------------------------------------------- |
+| 用户            | 提交问题并接收最终回复。                        |
+| CLI             | 接收输入，调用 Agent，并向用户显示结果。        |
+| Agent           | 管理消息历史，调用 LLM，分派 Tool，并控制循环。 |
+| LLM 抽象层      | 统一封装不同模型后端的调用方式。                |
+| OpenAI 兼容接口 | 调用 OpenAI 或兼容 OpenAI 协议的模型服务。      |
+| LiteLLM 接口    | 通过 LiteLLM 调用其他模型供应商。               |
+| LLMResponse     | 保存 LLM 返回的文本、ToolCall 和 Token 信息。   |
+| Tool 集合       | 执行文件、命令、搜索或子 Agent 等操作。         |
+
+## 2. 调用流程图
+
+```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart TD
+    START(["用户提交问题"]) --> CLI["CLI 接收问题"]
+    CLI --> A["Agent.chat"]
+    A --> ROUND{"还有可用轮次？"}
+
+    ROUND -->|"NO"| MAX["生成轮次终止信息"]
+    MAX --> OUTPUT["CLI 输出结果"]
+    OUTPUT --> USER(["返回用户"])
+
+    ROUND -->|"YES"| COMPRESS{"需要压缩上下文？"}
+    COMPRESS -->|"YES"| DOCOMPRESS["压缩上下文"]
+    COMPRESS -->|"NO"| REQUEST["准备消息和 Tool Schema"]
+    DOCOMPRESS --> REQUEST
+
+    REQUEST --> BACKEND{"使用 LiteLLM？"}
+    BACKEND -->|"YES"| LITE["调用 LiteLLM"]
+    BACKEND -->|"NO"| OPENAI["调用 OpenAI 兼容接口"]
+    LITE --> SUCCESS{"LLM 调用成功？"}
+    OPENAI --> SUCCESS
+
+    SUCCESS -->|"NO"| LLMERR["CLI 显示错误"]
+    LLMERR --> ENDERR(["结束本轮"])
+    SUCCESS -->|"YES"| HASTOOL{"包含 ToolCall？"}
+
+    HASTOOL -->|"NO"| FINAL["保存最终文本"]
+    FINAL --> OUTPUT
+    HASTOOL -->|"YES"| MULTI{"多个 ToolCall？"}
+
+    MULTI -->|"YES"| MANY["并行调用多个 Tool"]
+    MULTI -->|"NO"| AGENTTOOL{"调用 agent Tool？"}
+    AGENTTOOL -->|"YES"| SUB["调用子 Agent"]
+    AGENTTOOL -->|"NO"| ONE["串行调用一个 Tool"]
+
+    MANY --> INTERRUPTED{"工具执行被中断？"}
+    SUB --> INTERRUPTED
+    ONE --> INTERRUPTED
+    INTERRUPTED -->|"YES"| BACKFILL["补全未完成的 Tool 结果"]
+    BACKFILL --> INTMSG["CLI 显示中断"]
+    INTMSG --> ENDERR
+
+    INTERRUPTED -->|"NO"| TOOLOK{"工具调用成功？"}
+    TOOLOK -->|"YES"| RESULT["写入工具结果"]
+    TOOLOK -->|"NO"| TOOLERR["写入工具错误"]
+    RESULT --> HISTORY["更新消息历史"]
+    TOOLERR --> HISTORY
+    HISTORY --> ROUND
+```
+
+## 3. 调用时序图
+
+```mermaid
+sequenceDiagram
+    actor User as 用户
+    participant CLI as CLI
+    participant Agent as Agent
+    participant LLM as LLM
+    participant Tool as Tool
+    participant Sub as 子 Agent
+
+    User->>CLI: 提交问题
+    CLI->>Agent: chat(question)
+    Agent->>LLM: 发送消息和工具定义
+    LLM-->>Agent: 返回文本或 ToolCall
+
+    alt 返回最终文本
+        Agent-->>CLI: 返回最终回复
+        CLI-->>User: 显示回复
+    else 一个普通 ToolCall
+        Agent->>Tool: 串行执行
+        Tool-->>Agent: 返回工具结果
+        Agent->>LLM: 携带工具结果再次请求
+        LLM-->>Agent: 返回最终文本
+        Agent-->>CLI: 返回最终回复
+        CLI-->>User: 显示回复
+    else 多个 ToolCall
+        par 并行执行
+            Agent->>Tool: 执行工具 1
+        and
+            Agent->>Tool: 执行工具 2
+        end
+        Tool-->>Agent: 返回全部工具结果
+        Agent->>LLM: 携带工具结果再次请求
+        LLM-->>Agent: 返回最终文本
+        Agent-->>CLI: 返回最终回复
+        CLI-->>User: 显示回复
+    else agent ToolCall
+        Agent->>Sub: 派发子任务
+        Sub->>LLM: 独立上下文中请求
+        LLM-->>Sub: 子任务结果
+        Sub-->>Agent: 返回子 Agent 结果
+        Agent->>LLM: 携带子 Agent 结果再次请求
+        LLM-->>Agent: 返回最终文本
+        Agent-->>CLI: 返回最终回复
+        CLI-->>User: 显示回复
+    end
+```
+
+说明：上图使用 `alt / else` 将一次 LLM 返回后的时序划分为四个选择分区，每次只进入其中一个分区。
+
+- 返回最终文本：没有 `ToolCall`，Agent 直接向用户返回回复。
+- 一个普通 ToolCall：只有一个非 `agent` Tool，Agent 串行执行它。
+- 多个 ToolCall：同时返回多个 Tool，Agent 并行执行；其中可以包含 `agent` Tool。
+- agent ToolCall：只有一个 `agent` Tool，主 Agent 等待子 Agent 完成。
+
+后三个分区完成后，结果都会交回主 Agent。LLM 可能继续选择新的 ToolCall 分区，也可能进入“返回最终文本”分区；若达到终止条件，则流程结束。
