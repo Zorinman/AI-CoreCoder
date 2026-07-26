@@ -1,6 +1,9 @@
 # 虚拟环境
-- 进入
-`source myenv/bin/activate`
+- 进入（二选一）
+
+`myenv\Scripts\activate` # Windows
+
+`source myenv/bin/activate`   #Linux
 - 检查
 `where python`          # Windows
 - 退出
