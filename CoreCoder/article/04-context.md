@@ -112,8 +112,34 @@ messages.extend(tail)
 
 设想历史是这样一段：assistant 发起了工具调用、紧跟着是对应的 tool 回复。如果「保留最近 N 条」这个边界恰好落在 tool 回复上，那么被保留的尾巴就会以一条 tool 消息开头，而产生它的那条 assistant 消息被切到前面、压进摘要里没了。这条 tool 回复成了孤儿，它前面找不到对应的 tool_calls。下一次请求带着这个孤儿发出去，API 当场拒绝。你的压缩逻辑本来是来救场的，结果亲手把会话搞死了。
 
-`_safe_split` 就是来防这个的。它在切分前，把边界往前挪，直到边界那条消息不再是 tool：
+`_safe_split` 就是来防这个的。它在切分前，把边界往前挪，直到边界那条消息不再是 tool
 
+### 错误切分：假设应保留最近两条，初始切分点是 split = 2
+messages[1] 被压缩，但 messages[2] 被保留。messages[2]["tool_call_id"] == "call_1"，却找不到对应的 messages[1]["tool_calls"]，因此它成为孤儿。
+```text
+old  = messages[:2]          tail = messages[2:]
+
+messages[0]  messages[1]     │  messages[2]  messages[3]
+┌──────────┐ ┌─────────────┐ │  ┌──────────┐ ┌──────────┐
+│ user     │ │ assistant   │ │  │ tool     │ │ user     │
+│          │ │ tool_calls  │ │  │ call_1   │ │          │
+└──────────┘ └─────────────┘ │  └──────────┘ └──────────┘
+                              ↑
+                         切分点在 tool 上
+```
+### 安全切分：_safe_split() 发现 messages[2]["role"] == "tool"，将 split 减为 1
+这样 messages[1] 与 messages[2] 会同时保留，工具调用和工具结果的关联完整。
+```text
+old = messages[:1]                  tail = messages[1:]
+
+messages[0]                          │  messages[1]  messages[2]  messages[3]
+┌──────────┐                         │  ┌──────────┐ ┌──────────┐ ┌──────────┐
+│ user     │                         │  │ assistant│ │ tool     │ │ user     │
+│          │                         │  │ tool_calls│ │ call_1  │ │          │
+└──────────┘                         │  └──────────┘ └──────────┘ └──────────┘
+                                      ↑
+                             安全切分点在 assistant 前
+```
 ```python
 @staticmethod
 def _safe_split(messages: list[dict], keep_recent: int) -> int:
