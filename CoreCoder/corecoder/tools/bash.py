@@ -63,7 +63,7 @@ class BashTool(Tool):
         if warning:
             return f"⚠ Blocked: {warning}\nCommand: {command}\nIf intentional, modify the command to be more specific."
 
-        # use this thread's own tracked working directory
+        # # 读：取当前线程自己的 cwd，没有就退回进程 cwd
         cwd = getattr(_local, "cwd", None) or os.getcwd()
 
         try:
