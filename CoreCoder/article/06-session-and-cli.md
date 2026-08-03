@@ -8,7 +8,7 @@
 
 `cli.py` 的主体是 `_repl`，一个 `while True`。注意它和第一篇那个 agent 主循环是两层不同的循环：这里这层是「读用户输入、交给 agent、打印回复、再读下一句」，是人机交互的循环；agent 内部那层是「问模型、跑工具」，是任务执行的循环。一次人类输入，往往触发 agent 内部转好几圈。
 
-输入这块用了 `prompt_toolkit`，带历史记录，还自定义了一个挺贴心的键位：
+输入这块用了 `prompt_toolkit`，带历史记录，还自定义了一个挺贴心的键位： 
 
 ```python
 @kb.add("enter")
@@ -85,12 +85,28 @@ def _run_once(agent, prompt):
 
 ## 压轴：别让一个会话名把你的文件系统掀了
 
-现在讲 `session.py` 里那个我最想让你记住的东西。
+接下来介绍 `session.py` 中最关键的一个安全问题。
 
-会话存盘看着是最人畜无害的功能：把 `messages` 和模型名 dump 成 JSON 写到磁盘，读的时候再 load 回来。文件名用会话 id。问题就出在这个 id 上，它是会从用户那儿来的，你 `/save` 之后用 `corecoder -r <id>` 续聊，这个 `<id>` 是用户在命令行里敲的任意字符串。
+会话持久化表面上很简单：将 `messages` 和模型名称序列化为 JSON 后写入磁盘，读取时再反序列化。会话 ID 被用作文件名，但它来自用户输入：执行 `/save` 后，用户可通过 `corecoder -r <id>` 恢复会话，其中 `<id>` 是命令行中传入的任意字符串。
 
-设想最朴素的实现：`SESSIONS_DIR / f"{session_id}.json"`。如果用户（或者某个喂给它会话名的上游程序）把 id 设成 `../../etc/passwd` 会怎样？这个路径会解析到会话目录之外，你的「存会话」变成了「往任意位置写文件」，「读会话」变成了「读任意文件」。这是经典的路径穿越漏洞，无数真实系统栽在它上面。
-
+设想采用最直接的实现：`SESSIONS_DIR / f"{session_id}.json"`表示在会话目录下，使用会话 ID 生成 JSON 文件路径。若用户，或向程序传入会话名的上游程序，将 session_id设为 `../../etc/passwd`，".."表示上一级目录，与`SESSIONS_DIR` 拼接后的最终路径就可能解析到会话目录之外。原本的「保存会话」会变成「向任意位置写入文件」，「读取会话」则可能变成「读取任意文件」。这正是经典的路径穿越漏洞，许多真实系统都曾因此受到影响。
+### 例：
+ **正常情况**：
+```python
+SESSIONS_DIR = Path("/app/sessions")
+session_id = "chat-001"
+#结果
+/app/sessions/chat-001.json
+```
+**错误情况**
+```Python
+SESSIONS_DIR = Path("/app/sessions")
+session_id = "../../etc/passwd"
+#拼接后的原路径如下
+/app/sessions/../../etc/passwd.json
+# 文件系统解析时会逐级处理,最终路径已经离开 /app/sessions，到达会话目录外
+/app/sessions → /app → / → /etc/passwd.json
+```
 CoreCoder 用两道关来防，纵深防御。第一道，把 id 规整成一个安全的纯文件名：
 
 ```python

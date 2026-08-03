@@ -476,6 +476,48 @@ _PRICING = {
 
 `_DANGEROUS_PATTERNS` 也是列表结构，元素形如 `(正则表达式, 风险说明)`；完整规则直接见 [bash.py](../CoreCoder/corecoder/tools/bash.py)。
 
+# CoreCoder 命令行接口
+
+命令行接口分为启动参数和交互内置命令两部分。两者均由 [cli.py](../CoreCoder/corecoder/cli.py) 实现，但处理时机和职责不同。
+
+## 1. 启动参数
+
+`_parse_args()` 使用 `argparse` 在 `main()` 开始时解析启动参数。参数只解析一次，用于创建或恢复运行环境；随后才进入单次运行模式或交互 REPL。
+
+| 参数 | 作用 | 生效方式 |
+| --- | --- | --- |
+| `-m`, `--model` | 指定模型名 | 覆盖环境变量加载的 `Config.model`。 |
+| `--base-url` | 指定 OpenAI 兼容 API 地址 | 覆盖 `Config.base_url`。 |
+| `--api-key` | 指定 API Key | 覆盖 `Config.api_key`。 |
+| `-p`, `--prompt` | 提供单次提示词 | 调用一次 `Agent.chat()` 后退出，不进入交互 REPL。 |
+| `-r`, `--resume ID` | 恢复已保存会话 | 加载 `messages` 和保存时的模型；指定 `--model` 时优先使用该参数。 |
+| `-v`, `--version` | 显示版本 | 由 `argparse` 输出版本并结束程序。 |
+
+例如，`corecoder --model gpt-5.4 --resume session_123` 在启动时设置模型并恢复会话。
+
+## 2. 交互内置命令
+
+程序未使用 `--prompt` 时会进入 `_repl()`。用户在 `You >` 提示符中输入以下命令，由 REPL 在调用 `Agent.chat()` 前直接处理。
+
+| 输入 | 作用 |
+| --- | --- |
+| `/help` | 显示交互命令和输入快捷键。 |
+| `/reset` | 清空当前对话历史。 |
+| `/model` | 显示当前模型。 |
+| `/model <name>` | 在当前进程中切换模型。 |
+| `/tokens` | 显示累计输入、输出 Token 及可用时的费用估算。 |
+| `/compact` | 对当前对话历史执行上下文压缩，并显示压缩前后的估算 Token 数。 |
+| `/diff` | 显示当前会话修改过的文件。 |
+| `/save` | 将当前会话保存到磁盘。 |
+| `/sessions` | 列出已保存会话。 |
+| `quit`、`exit`、`/quit`、`/exit` | 退出交互 REPL。 |
+
+未被识别且以 `/` 开头的输入会显示未知命令提示，不会发送给模型。普通文本输入才会作为用户消息传入 `Agent.chat()`。
+
+## 3. 两类命令的边界
+
+启动参数用于确定初始配置、恢复会话和选择运行模式；交互内置命令用于操作已创建的 `Agent`、`LLM` 和会话状态。`/model <name>` 可以改变当前运行中的模型，但不修改下一次启动时使用的环境变量或配置文件。
+
 # CoreCoder 调用路径图
 
 ## 1. 整体架构图
