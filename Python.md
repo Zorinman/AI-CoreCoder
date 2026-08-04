@@ -112,3 +112,29 @@ deactivate
 `Remove-Item -Recurse -Force myenv`
 **Mac / Linux**
 `rm -rf myenv`
+
+## Python 包的初始化与模块入口
+
+Python 中以双下划线开头和结尾的名称，例如 `__main__`，通常称为 dunder 名称。部分 dunder 名称由解释器或导入系统识别，因此拼写必须精确匹配。
+
+### `__init__.py`
+
+`__init__.py` 是常规 Python 包的初始化文件。执行 `import package_name` 时，Python 会执行该文件中的代码。
+
+- 可以定义包版本等元数据，例如 `__version__`。`__version__` 是社区约定，不是解释器内置行为。
+- 可以重新导出常用对象，使调用方使用更短的导入路径，例如 `from corecoder import Agent`。
+- `__all__` 用于声明 `from package_name import *` 可导出的名称；它不限制普通的显式导入。
+- Python 3.3 起可以创建不含 `__init__.py` 的命名空间包，但这类包没有可执行的初始化文件，也无法在其中集中声明公共 API。
+
+将文件改名为 `_init_.py` 后，它会成为普通模块，导入包时不会自动执行。
+
+### `__main__.py`
+
+`__main__.py` 是包的模块启动入口。执行以下命令时，Python 会查找并运行包内这个精确名称的文件：
+
+```bash
+python -m package_name
+```
+
+例如，执行 `python -m corecoder` 时会运行 `corecoder/__main__.py`。CoreCoder 的该文件将控制权转交给 `corecoder.cli.main()`，因此模块启动方式与 CLI 主入口使用同一套逻辑。
+
