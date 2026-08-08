@@ -8,6 +8,8 @@
 对应 spec：[docs/specs/0001-concurrency-scheduling.md](specs/0001-concurrency-scheduling.md)
 对应 ADR：[docs/adr/0001-concurrency-safety-whitelist.md](adr/0001-concurrency-safety-whitelist.md)
 
+**状态**：已归档（实现提交 `d8a25c4`，2026-08-08；归档日期 2026-08-09）
+
 ### 问题
 
 原实现里，`Agent` 收到多个 `tool_calls` 时只要数量大于 1 就统一丢进
@@ -38,4 +40,3 @@
   行执行。
 - `tests/test_core.py`：新增分段调度相关的单元测试（分段结果、安全段确实
   并发重叠、不安全段严格无重叠、混合批次结果顺序保持一致）。
-

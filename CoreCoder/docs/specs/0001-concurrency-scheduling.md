@@ -1,8 +1,20 @@
 ---
 title: 细化并发调度策略：区分并发安全工具与不安全工具
-status: ready-for-agent
+status: archived
 depends_on: []
+implemented_in: d8a25c4
+archived_on: 2026-08-09
 ---
+
+# 归档记录
+
+- **状态**：已归档
+- **实现提交**：`d8a25c4`（2026-08-08）
+- **实现位置**：`corecoder/tools/base.py`、`corecoder/tools/read.py`、
+  `corecoder/tools/glob_tool.py`、`corecoder/tools/grep.py` 与
+  `corecoder/agent.py`。
+- **验证范围**：`tests/test_core.py` 覆盖默认拒绝、分段结果、未知工具、
+  安全段并发、不安全段串行与混合调用的结果顺序。
 
 # Problem Statement
 
