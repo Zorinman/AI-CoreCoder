@@ -10,6 +10,12 @@ class Tool(ABC):
     description: str
     parameters: dict  # JSON Schema for the function args
 
+    # Default-deny: a tool is only run concurrently with other tools when it
+    # explicitly opts in. Tools with side effects or shared mutable state
+    # (bash, agent, ...) must stay False so a forgotten declaration fails
+    # safe (serial), not unsafe (concurrent).
+    concurrency_safe: bool = False
+
     @abstractmethod
     def execute(self, **kwargs) -> str:
         """Run the tool and return a text result."""

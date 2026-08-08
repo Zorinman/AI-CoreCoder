@@ -28,6 +28,7 @@ class ReadFileTool(Tool):
         },
         "required": ["file_path"],
     }
+    concurrency_safe = True
 
     def execute(self, file_path: str, offset: int = 1, limit: int = 2000) -> str:
         try:

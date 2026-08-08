@@ -5,6 +5,7 @@ from corecoder import session as session_module
 from corecoder.context import ContextManager, estimate_tokens
 from corecoder.session import save_session, load_session, list_sessions
 from corecoder.tools import get_tool
+from corecoder.tools.base import Tool
 
 
 def test_version():
@@ -231,3 +232,170 @@ def test_interrupt_backfills_missing_tool_replies():
     ids = [m["tool_call_id"] for m in replies]
     assert sorted(ids) == ["a", "b"]
     assert ids.count("a") == 1  # the already-answered call wasn't duplicated
+
+
+# --- Concurrency-safe tool scheduling ---
+
+def _make_tc(name, call_id):
+    class _TC:
+        pass
+    tc = _TC()
+    tc.name = name
+    tc.id = call_id
+    tc.arguments = {}
+    return tc
+
+
+def test_tool_base_defaults_to_unsafe():
+    from corecoder.tools.base import Tool
+
+    class _Undeclared(Tool):
+        name = "undeclared"
+        description = "does not declare concurrency_safe"
+        parameters = {"type": "object", "properties": {}, "required": []}
+
+        def execute(self):
+            return "ok"
+
+    assert _Undeclared.concurrency_safe is False
+
+
+def test_segment_tool_calls_groups_consecutive_runs():
+    """safe, safe, unsafe, safe -> three segments, in original order."""
+
+    class _Safe(Tool):
+        name = "safe"
+        description = "x"
+        parameters = {"type": "object", "properties": {}, "required": []}
+        concurrency_safe = True
+
+        def execute(self):
+            return "s"
+
+    class _Unsafe(Tool):
+        name = "unsafe"
+        description = "x"
+        parameters = {"type": "object", "properties": {}, "required": []}
+
+        def execute(self):
+            return "u"
+
+    agent = Agent(llm=LLM.__new__(LLM), tools=[_Safe(), _Unsafe()])
+    calls = [
+        _make_tc("safe", "1"),
+        _make_tc("safe", "2"),
+        _make_tc("unsafe", "3"),
+        _make_tc("safe", "4"),
+    ]
+    segments = agent._segment_tool_calls(calls)
+    assert [safe for safe, _ in segments] == [True, False, True]
+    assert [[tc.id for tc in group] for _, group in segments] == [["1", "2"], ["3"], ["4"]]
+
+
+def test_unknown_tool_is_treated_as_unsafe():
+    """A tool_call for a tool outside this Agent's set must not be scheduled
+    as concurrency-safe just because it's absent from _tool_by_name."""
+    agent = Agent(llm=LLM.__new__(LLM), tools=[])
+    assert agent._tool_is_safe(_make_tc("bash", "1")) is False
+
+
+def test_safe_tool_calls_run_concurrently():
+    """A run of concurrency-safe calls must overlap in wall-clock time."""
+    import threading
+    import time
+    from corecoder.tools.base import Tool
+
+    start_gate = threading.Barrier(3, timeout=5)
+    overlap = threading.Event()
+    active = {"count": 0}
+    lock = threading.Lock()
+
+    class _SlowSafe(Tool):
+        name = "slow_safe"
+        description = "x"
+        parameters = {"type": "object", "properties": {}, "required": []}
+        concurrency_safe = True
+
+        def execute(self):
+            with lock:
+                active["count"] += 1
+                if active["count"] >= 2:
+                    overlap.set()
+            start_gate.wait()
+            time.sleep(0.05)
+            with lock:
+                active["count"] -= 1
+            return "done"
+
+    agent = Agent(llm=LLM.__new__(LLM), tools=[_SlowSafe()])
+    calls = [_make_tc("slow_safe", str(i)) for i in range(3)]
+    results = agent._exec_tools_parallel(calls)
+    assert results == ["done", "done", "done"]
+    assert overlap.is_set()
+
+
+def test_unsafe_tool_calls_run_serially_without_overlap():
+    """Consecutive unsafe calls must never be in flight at the same time."""
+    import threading
+    from corecoder.tools.base import Tool
+
+    active = {"count": 0, "max_seen": 0}
+    lock = threading.Lock()
+
+    class _Unsafe(Tool):
+        name = "unsafe"
+        description = "x"
+        parameters = {"type": "object", "properties": {}, "required": []}
+
+        def execute(self):
+            with lock:
+                active["count"] += 1
+                active["max_seen"] = max(active["max_seen"], active["count"])
+            with lock:
+                active["count"] -= 1
+            return "done"
+
+    agent = Agent(llm=LLM.__new__(LLM), tools=[_Unsafe()])
+    calls = [_make_tc("unsafe", str(i)) for i in range(4)]
+    results = agent._exec_tools_parallel(calls)
+    assert results == ["done"] * 4
+    assert active["max_seen"] == 1
+
+
+def test_mixed_batch_preserves_original_result_order():
+    """Result order must match the original tool_calls order regardless of
+    how many concurrent/serial segments the batch was split into."""
+    from corecoder.tools.base import Tool
+
+    class _Safe(Tool):
+        name = "safe"
+        description = "x"
+        parameters = {"type": "object", "properties": {}, "required": []}
+        concurrency_safe = True
+
+        def execute(self, tag=""):
+            return f"safe:{tag}"
+
+    class _Unsafe(Tool):
+        name = "unsafe"
+        description = "x"
+        parameters = {"type": "object", "properties": {}, "required": []}
+
+        def execute(self, tag=""):
+            return f"unsafe:{tag}"
+
+    agent = Agent(llm=LLM.__new__(LLM), tools=[_Safe(), _Unsafe()])
+
+    def tc(name, call_id, tag):
+        t = _make_tc(name, call_id)
+        t.arguments = {"tag": tag}
+        return t
+
+    calls = [
+        tc("safe", "1", "a"),
+        tc("unsafe", "2", "b"),
+        tc("safe", "3", "c"),
+        tc("safe", "4", "d"),
+    ]
+    results = agent._exec_tools_parallel(calls)
+    assert results == ["safe:a", "unsafe:b", "safe:c", "safe:d"]

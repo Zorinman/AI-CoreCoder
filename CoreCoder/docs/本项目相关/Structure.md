@@ -162,21 +162,26 @@ class ToolCall:
 
 `schema()` 会把前三项包装为 OpenAI function calling 所需的字典。`Tool` 继承 Python 标准库的 `ABC`，`@abstractmethod` 保证子类必须实现 `execute()`。
 
+`Tool` 还带一个类属性 `concurrency_safe: bool = False`，子类不声明即继承
+`False`（默认拒绝）。它标记该工具的 `execute()` 是否可以和其他并发安全工具
+同时运行而不产生副作用冲突；`Agent` 批量执行工具调用时依据这个属性决定调度
+方式，见下文"具体工具类"表格和第八节。
+
 ### 2. 具体工具类
 
 以下 7 个类都继承 `Tool`，因此 `Agent` 可以以同一种方式调用它们。
 
-| 类              | 工具名       | 作用                                                       |
-| --------------- | ------------ | ---------------------------------------------------------- |
-| `BashTool`      | `bash`       | 执行 Shell 命令，检测部分危险命令、限制超时并截断过长输出  |
-| `ReadFileTool`  | `read_file`  | 按行读取文本文件，支持起始行和最大行数                     |
-| `WriteFileTool` | `write_file` | 创建文件或完整覆盖文件内容                                 |
-| `EditFileTool`  | `edit_file`  | 用唯一的 `old_string` 精确替换为 `new_string`，并返回 diff |
-| `GlobTool`      | `glob`       | 按 glob 模式查找文件，最多返回 100 个结果                  |
-| `GrepTool`      | `grep`       | 用正则搜索文件内容，跳过常见无关目录                       |
-| `AgentTool`     | `agent`      | 创建独立上下文的子 Agent，完成子任务后返回摘要             |
+| 类              | 工具名       | 作用                                                       | `concurrency_safe` |
+| --------------- | ------------ | ---------------------------------------------------------- | ------------------- |
+| `BashTool`      | `bash`       | 执行 Shell 命令，检测部分危险命令、限制超时并截断过长输出  | `False`（默认）    |
+| `ReadFileTool`  | `read_file`  | 按行读取文本文件，支持起始行和最大行数                     | `True`              |
+| `WriteFileTool` | `write_file` | 创建文件或完整覆盖文件内容                                 | `False`（默认）    |
+| `EditFileTool`  | `edit_file`  | 用唯一的 `old_string` 精确替换为 `new_string`，并返回 diff | `False`（默认）    |
+| `GlobTool`      | `glob`       | 按 glob 模式查找文件，最多返回 100 个结果                  | `True`              |
+| `GrepTool`      | `grep`       | 用正则搜索文件内容，跳过常见无关目录                       | `True`              |
+| `AgentTool`     | `agent`      | 创建独立上下文的子 Agent，完成子任务后返回摘要             | `False`（默认）    |
 
-`AgentTool` 比其他工具多一个 `_parent_agent` 引用。主 `Agent` 初始化时会注入自己；子 Agent 会复用父模型，但移除 `agent` 工具以禁止递归派生。
+`AgentTool` 比其他工具多一个 `_parent_agent` 引用。主 `Agent` 初始化时会注入自己；子 Agent 会复用父模型，但移除 `agent` 工具以禁止递归派生。`AgentTool` 保持 `concurrency_safe` 默认值——子 agent 内部可能触发写操作或消耗共享的降级/预算状态，不适合被当作并发安全工具处理。
 
 ## 四、共享注册表与辅助状态
 
@@ -193,13 +198,19 @@ class ToolCall:
 | `_SKIP_DIRS`          | `set[str]`         | `tools/grep.py`     | `grep` 递归搜索时忽略的目录名集合                         |
 | `SESSIONS_DIR`        | `Path`             | `session.py`        | 会话 JSON 的固定存储目录                                  |
 
+`Agent` 执行一批 `tool_calls` 时，还会调用 `_segment_tool_calls()` 按
+`Tool.concurrency_safe` 把它们分成若干 `(is_safe, calls)` 段——这是一个只
+在方法内部临时构造的 `list[tuple[bool, list]]`，不长期保存，因此没有单独
+列进上表；具体算法见第五节 `_exec_tools_parallel()` 的源码。
+
 ### 关系总结
 
 1. `Config` 决定创建哪种 `LLM`。
 2. `Agent` 持有 `LLM`、`ContextManager`、工具列表和消息列表。
 3. `LLM` 将供应商流式响应解析为 `LLMResponse`；其中的 `ToolCall` 指向某个 `Tool`。
 4. `Agent` 通过 `_tool_by_name` 找到工具，执行后把工具结果字典写回 `messages`。
-5. `ContextManager` 在需要时压缩同一个 `messages` 列表；会话功能将该列表持久化为 JSON。
+5. 多个 `tool_calls` 会先按 `Tool.concurrency_safe` 分段，再分别用线程池并发或直接串行执行，结果仍按原始调用顺序写回 `messages`。
+6. `ContextManager` 在需要时压缩同一个 `messages` 列表；会话功能将该列表持久化为 JSON。
 
 ## 五、数据结构定义源码
 
@@ -317,6 +328,7 @@ class Tool(ABC):
     name: str
     description: str
     parameters: dict
+    concurrency_safe: bool = False
 
     @abstractmethod
     def execute(self, **kwargs) -> str:

@@ -32,6 +32,7 @@ class GrepTool(Tool):
         },
         "required": ["pattern"],
     }
+    concurrency_safe = True
 
     def execute(self, pattern: str, path: str = ".", include: str | None = None) -> str:
         try:

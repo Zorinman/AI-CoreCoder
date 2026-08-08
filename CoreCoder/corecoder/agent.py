@@ -114,20 +114,50 @@ class Agent:
         except Exception as e:
             return f"Error executing {tc.name}: {e}"
 
+    def _tool_is_safe(self, tc) -> bool:
+        """Whether tc's tool declared itself concurrency-safe. Unknown tools
+        (not found in _tool_by_name) are treated as unsafe, same as the
+        Tool base class default."""
+        tool = self._tool_by_name.get(tc.name)
+        return bool(tool is not None and getattr(tool, "concurrency_safe", False))
+
+    def _segment_tool_calls(self, tool_calls) -> list[tuple[bool, list]]:
+        """Split tool_calls into (is_safe, calls) runs, preserving original
+        order. Consecutive safe calls share one concurrent segment;
+        consecutive unsafe calls share one serial segment. This keeps the
+        causal order of unsafe (side-effecting) calls intact while still
+        letting runs of safe calls execute in parallel."""
+        segments: list[tuple[bool, list]] = []
+        for tc in tool_calls:
+            safe = self._tool_is_safe(tc)
+            if segments and segments[-1][0] == safe:
+                segments[-1][1].append(tc)
+            else:
+                segments.append((safe, [tc]))
+        return segments
+
     def _exec_tools_parallel(self, tool_calls, on_tool=None) -> list[str]:
-        """Run multiple tool calls concurrently using threads.
+        """Run multiple tool calls, executing consecutive concurrency-safe
+        calls in parallel and everything else serially, in original order.
 
         This is inspired by Claude Code's StreamingToolExecutor which starts
         executing tools while the model is still generating.  We simplify to:
-        when the model returns N tool calls at once, run them in parallel.
+        when the model returns N tool calls at once, segment them by safety
+        and run each segment accordingly.
         """
         for tc in tool_calls:
             if on_tool:
                 on_tool(tc.name, tc.arguments)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-            futures = [pool.submit(self._exec_tool, tc) for tc in tool_calls]
-            return [f.result() for f in futures]
+        results: list[str] = []
+        for safe, group in self._segment_tool_calls(tool_calls):
+            if safe and len(group) > 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                    futures = [pool.submit(self._exec_tool, tc) for tc in group]
+                    results.extend(f.result() for f in futures)
+            else:
+                results.extend(self._exec_tool(tc) for tc in group)
+        return results
 
     def _answer_pending_tool_calls(self, tool_calls):
         """Backfill a tool reply for every call that didn't get one.

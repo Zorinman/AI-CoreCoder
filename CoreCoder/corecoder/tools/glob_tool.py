@@ -24,6 +24,7 @@ class GlobTool(Tool):
         },
         "required": ["pattern"],
     }
+    concurrency_safe = True
 
     def execute(self, pattern: str, path: str = ".") -> str:
         try:
