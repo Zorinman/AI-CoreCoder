@@ -53,6 +53,7 @@ class Agent:
         """Process one user message. May involve multiple LLM/tool rounds."""
         self.messages.append({"role": "user", "content": user_input})
         self.context.maybe_compress(self.messages, self.llm)
+        fallback_messages: list[str] = []
 
         for _ in range(self.max_rounds):
             try:
@@ -61,18 +62,23 @@ class Agent:
                         f"Estimated cost ${self.llm.estimated_cost:.6f} exceeds the hard budget "
                         f"of ${self.llm.budget.limit_usd:.6f}. Use /budget <amount> to increase it."
                     )
+                previous_index = getattr(self.llm, "active_index", 0)
                 resp = self.llm.chat(
                     messages=self._full_messages(),
                     tools=self._tool_schemas(),
                     on_token=on_token,
                 )
+                if getattr(self.llm, "active_index", 0) != previous_index:
+                    message = f"当前使用模型已切换为备用模型 {self.llm.model}。"
+                    self.messages.append({"role": "system", "content": message})
+                    fallback_messages.append(message)
             except BudgetExceededError as exc:
                 return str(exc)
 
             # no tool calls -> LLM is done, return text
             if not resp.tool_calls:
                 self.messages.append(resp.message)
-                return resp.content
+                return "\n\n".join([*fallback_messages, resp.content])
 
             # tool calls -> execute (parallel when multiple, like Claude Code's
             # StreamingToolExecutor which runs independent tools concurrently)

@@ -256,6 +256,9 @@ def _repl(agent: Agent, config: Config):
             response = agent.chat(user_input, on_token=on_token, on_tool=on_tool)
             if streamed:
                 print()  # newline after streamed tokens
+                for line in response.splitlines():
+                    if line.startswith("当前使用模型已切换为备用模型 "):
+                        console.print(f"[yellow]{line}[/yellow]")
             else:
                 # response wasn't streamed (came after tool calls)
                 console.print(Markdown(response))

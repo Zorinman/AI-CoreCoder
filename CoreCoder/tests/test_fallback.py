@@ -23,13 +23,15 @@ class _FakeLLM:
         self.cost = cost
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self.requests = []
 
     @property
     def estimated_cost(self):
         return self.cost
 
-    def chat(self, **_kwargs):
+    def chat(self, **kwargs):
         self.calls += 1
+        self.requests.append(kwargs.get("messages", []))
         if self.calls <= self.failures:
             raise RuntimeError(f"{self.model} unavailable")
         return LLMResponse(content=self.model)
@@ -62,6 +64,22 @@ def test_chain_reports_a_clear_error_when_every_level_fails():
 
     with pytest.raises(FallbackExhaustedError, match="fallback chain exhausted"):
         chain.chat(messages=[])
+
+
+def test_agent_notifies_user_and_records_a_successful_fallback():
+    fallback = _FakeLLM("fallback")
+    agent = Agent(
+        llm=ModelChain(_FakeLLM("primary", failures=3), [fallback]),
+        tools=[],
+    )
+
+    response = agent.chat("hello")
+    agent.chat("which model is active?")
+
+    notice = "当前使用模型已切换为备用模型 fallback。"
+    assert response == f"{notice}\n\nfallback"
+    assert agent.messages[1] == {"role": "system", "content": notice}
+    assert {"role": "system", "content": notice} in fallback.requests[1]
 
 
 def test_explicit_model_switch_resets_circuit_without_changing_fallbacks():
