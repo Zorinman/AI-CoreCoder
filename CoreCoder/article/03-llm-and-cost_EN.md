@@ -112,7 +112,7 @@ The logic is classic exponential backoff: failures that are obviously transient,
 
 This retry logic is worth calling out specifically, because "a project this small surely has no room to bother with retries" is a natural misconception, and the truth is the opposite. Retry is not only present, it's thought through quite carefully, even defending with `getattr` against the base `APIError` possibly lacking a `status_code` attribute (different SDK versions have different exception hierarchies, and grabbing the attribute by force would blow up).
 
-What CoreCoder didn't do is Claude Code's heavier graceful degradation: auto-switching to a fallback model on persistent server-side 529s, and a dollar-denominated budget cap. It genuinely didn't do these two, but the reason isn't oversight, it's a tradeoff. A fallback model involves the "which model can stand in for which" policy that's hard to unify across providers, and a dollar budget requires maintaining a price table that keeps changing. CoreCoder did the part it could implement cleanly (backoff retry) and left the part that would drag in a lot of provider-specific logic (fallback, hard budget) for you to add as needed. Knowing "what it did" and "what it deliberately didn't do" is far more useful than a vague "it's crude."
+CoreCoder now adds those two safeguards: after a model exhausts its own retries, `ModelChain` advances through the ordered fallback levels configured by `Config`; a process-wide hard budget rejects new requests once the estimated cost exceeds the configured limit. Fallback selection stays provider-agnostic, while pricing remains an explicit table: models without a known price fail open instead of receiving a made-up estimate.
 
 There's also an easily overlooked coordination detail. `stream_options` is an OpenAI extension that some providers don't recognize and answer with a 400. CoreCoder handles it like this:
 
@@ -189,19 +189,18 @@ Finally, a thread through `config.py` (57 lines). It reads config from environme
 api_key = (
     os.getenv("CORECODER_API_KEY")
     or os.getenv("OPENAI_API_KEY")
-    or os.getenv("DEEPSEEK_API_KEY")
     or ""
 )
 ```
 
-The dedicated variable wins, then it falls back to the generic `OPENAI_API_KEY`, then to `DEEPSEEK_API_KEY`. It also walks up from the current directory to the home directory loading a `.env` file (`override=False`, so it won't overwrite the real environment variables you've already set). This way you drop a `.env` in the project directory and it works on entry, no need to export every time. A small thing, but handy.
+The dedicated variable wins, then it falls back to the generic `OPENAI_API_KEY`. It also walks up from the current directory to the home directory loading a `.env` file (`override=False`, so it won't overwrite the real environment variables you've already set). This way you drop a `.env` in the project directory and it works on entry, no need to export every time. A small thing, but handy.
 
 ## What this piece leaves you with
 
 - The bet that "most providers are OpenAI-compatible" lets the whole provider layer thin out to a single wrapper over the openai SDK, and switching providers is two environment variables.
 - In streaming output, tool-call arguments arrive in fragments, to be accumulated by index then `json.loads`-ed, and bad data must degrade gracefully.
 - Retry belongs in the provider layer, not stuffed into the main loop. Exponential backoff retries only transient failures and 5xx, never 4xx.
-- CoreCoder did backoff retry and deliberately skipped the fallback model and dollar hard budget, because the latter two drag in a lot of provider-specific logic. Tell "didn't do" apart from "deliberately didn't do."
+- CoreCoder combines provider-level backoff retry with an ordered fallback chain and a process-wide hard budget. Fallback routing is provider-agnostic; models without known pricing fail open.
 - Cost estimation returns `None` for an unknown model rather than inventing a falsely precise number. Honesty beats looking good.
 
 Next piece, we face the agent's hardest physical constraint: the context window is only so big, and how a long task fits inside it.

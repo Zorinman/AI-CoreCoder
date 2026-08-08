@@ -112,7 +112,7 @@ def _call_with_retry(self, params: dict, max_retries: int = 3):
 
 这段重试逻辑值得专门点出来，因为「这么小的项目应该没空管重试吧」是个很自然的误会，而事实正相反。重试不但在，还考虑得相当周到，连基类 `APIError` 可能没有 `status_code` 属性都用 `getattr` 防住了（不同版本的 SDK 异常层级不一样，硬取属性会炸）。
 
-CoreCoder 没做的，是 Claude Code 那种更重的优雅降级：服务端持续 529 时自动切换到一个备用模型（fallbackModel），以及按美元数的预算上限。这两样它确实没做，但原因不是疏忽，而是取舍。fallback 模型涉及「哪个模型能替哪个」这种跨 provider 难以统一的策略，美元预算又得维护一张随时在变的价目表。CoreCoder 把能干净实现的（退避重试）做了，把会引入大量 provider 专属逻辑的（fallback、硬预算）留给了你按需去加。知道「它做了什么」和「它故意没做什么」，比笼统说一句「它很简陋」有用得多。
+CoreCoder 现在也实现了这两道保护：模型耗尽自身重试后，`ModelChain` 会按 `Config` 配置的顺序尝试备用级别；进程级硬预算会在估算成本超过上限后拒绝新的请求。降级选择保持 provider 无关，价格仍由显式价目表提供；未列入价目表的模型无法估算成本，因此采用放行策略而不编造价格。
 
 还有个容易被忽略的协调细节。`stream_options` 是 OpenAI 的扩展，有些 provider 不认，会回一个 400。CoreCoder 的处理是：
 
@@ -189,19 +189,18 @@ Tokens: 12043 prompt + 3201 completion = 15244 total  (~$0.0621)
 api_key = (
     os.getenv("CORECODER_API_KEY")
     or os.getenv("OPENAI_API_KEY")
-    or os.getenv("DEEPSEEK_API_KEY")
     or ""
 )
 ```
 
-专属变量优先，然后退到通用的 `OPENAI_API_KEY`，再退到 `DEEPSEEK_API_KEY`。它还会从当前目录往上一直找到家目录，加载 `.env` 文件（`override=False`，不覆盖你已经设好的真环境变量）。这样你在项目目录放一个 `.env`，进来就能用，不用每次 export。小事，但顺手。
+专属变量优先，然后退到通用的 `OPENAI_API_KEY`。它还会从当前目录往上一直找到家目录，加载 `.env` 文件（`override=False`，不覆盖你已经设好的真环境变量）。这样你在项目目录放一个 `.env`，进来就能用，不用每次 export。小事，但顺手。
 
 ## 这一篇带走什么
 
 - 「大多数 provider 都兼容 OpenAI 接口」这个赌注，让整个 provider 层薄到只是 openai SDK 的一层包装，换 provider 就是换两个环境变量。
 - 流式输出里，工具调用的参数是分片到达的，得按 index 累加再 `json.loads`，还要对坏数据优雅降级。
 - 重试该放在 provider 层，不该塞进主循环。指数退避只重试瞬时故障和 5xx，绝不重试 4xx。
-- CoreCoder 做了退避重试，故意没做 fallback 模型和美元硬预算，因为后两者会拖进大量 provider 专属逻辑。分清「没做」和「故意没做」。
+- CoreCoder 结合 provider 层的退避重试、按顺序的降级链和进程级硬预算。降级路由与 provider 无关，未知价格的模型采用放行策略。
 - 成本估算宁可对未知模型返回 `None`，也不编一个假精确的数字。诚实比好看重要。
 
 下一篇，我们面对 agent 最硬的那道物理约束：上下文窗口就这么大，一个长任务怎么塞得下。

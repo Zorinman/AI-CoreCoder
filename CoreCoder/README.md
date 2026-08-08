@@ -78,6 +78,20 @@ corecoder                                             # interactive REPL
 corecoder -p "add error handling to parse_config()"   # one-shot mode, exits when done
 ```
 
+## Fallbacks and hard budget
+
+Copy `.env.example` to `.env` and configure ordered fallbacks with consecutive
+`CORECODER_FALLBACK_<N>_*` variables. Each level's `API_KEY` holds its secret
+directly. Keep `.env` untracked and never commit its keys. After a model
+exhausts its retries, CoreCoder advances
+through that list and keeps using the first successful fallback until
+`/model <name>` explicitly selects a new primary model.
+
+Set `CORECODER_MAX_COST_USD` to cap the process-wide estimated spend. Once the
+current estimated cost is above that limit, new LLM requests are refused while
+in-flight work is left alone. `/budget <usd>` can raise the limit without
+restarting; `/tokens` reports aggregate token usage and the estimated cost.
+
 ## Read it: the code map
 
 Laid out flat, the whole project is this big. Skim it before you clone and you'll know where everything is. This is the most concrete difference from Claude Code's hundreds of thousands of lines: you can read it like the table of contents of a book. Start from the main loop in `agent.py`; that's the heart of the whole agent.
@@ -167,7 +181,6 @@ print(Agent(llm=llm).chat("find every TODO comment in this project and list them
 Going deeper, the directions are out in the open too. None of the following is in CoreCoder, by design, not because it's unfinished. Flip it around and each one is an entry point you can carry into a real tool of your own:
 
 - **The dangerous-command blocking in bash is just a regex blacklist.** It guards against slips, not a security sandbox. Facing untrusted input means reaching for seccomp or container isolation. This is the hardest of the four; it goes all the way down to the syscall and isolation layer.
-- **Retry is only exponential backoff.** No fallback model, no hard dollar budget. Follow `llm.py` down and add a fallback model chain plus a stop-on-over-budget gate; the change stays mostly inside that one file.
 - **Sub-agents only run the plainest synchronous execution.** Make it async or a streaming executor and you close the exact gap the fifth essay identifies between this and how production agents stream execution.
 - **No MCP, no RAG.** Wire up MCP to give it the external tool ecosystem, or add retrieval-based code location for big repos. Both are real ways to grow from a minimal core into your own stronger agent.
 
@@ -181,6 +194,7 @@ Inside the REPL, `/help` lists everything; these are the ones you'll reach for:
 /model <name>    switch model
 /compact         compact the context by hand
 /tokens          token usage and cost estimate
+/budget <usd>    increase the hard budget limit
 /diff            files changed this session
 /save  /sessions save / list sessions
 quit / exit      exit (Ctrl+C cancels the current round)

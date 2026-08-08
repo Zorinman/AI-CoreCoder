@@ -94,18 +94,62 @@ class LLM:
         self.extra = kwargs  # temperature, max_tokens, etc.
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self._usage_by_model: dict[str, dict[str, int]] = {}
 
     @property
     def estimated_cost(self) -> float | None:
         """Rough cost estimate in USD. Returns None if model not in pricing table."""
+        usage = getattr(self, "_usage_by_model", None)
+        if usage:
+            total = 0.0
+            known = False
+            for model, counts in usage.items():
+                pricing = _PRICING.get(model)
+                if not pricing:
+                    continue
+                known = True
+                input_rate, output_rate = pricing
+                total += (
+                    counts.get("prompt_tokens", 0) * input_rate / 1_000_000
+                    + counts.get("completion_tokens", 0) * output_rate / 1_000_000
+                )
+            return total if known else None
         pricing = _PRICING.get(self.model)
         if not pricing:
             return None
         input_rate, output_rate = pricing
-        return (
-            self.total_prompt_tokens * input_rate / 1_000_000
-            + self.total_completion_tokens * output_rate / 1_000_000
-        )
+        return self.total_prompt_tokens * input_rate / 1_000_000 + self.total_completion_tokens * output_rate / 1_000_000
+
+    @property
+    def usage_by_model(self) -> dict[str, dict[str, int]]:
+        usage = getattr(self, "_usage_by_model", None)
+        if usage is None:
+            return {
+                self.model: {
+                    "prompt_tokens": getattr(self, "total_prompt_tokens", 0),
+                    "completion_tokens": getattr(self, "total_completion_tokens", 0),
+                }
+            }
+        return {name: dict(counts) for name, counts in usage.items()}
+
+    @property
+    def token_usage_by_model(self) -> dict[str, dict[str, int]]:
+        """Public alias for the per-model token accounting map."""
+        return self.usage_by_model
+
+    @token_usage_by_model.setter
+    def token_usage_by_model(self, value: dict[str, dict[str, int]]) -> None:
+        self._usage_by_model = {name: dict(counts) for name, counts in value.items()}
+
+    def _record_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
+        self.total_prompt_tokens += prompt_tokens
+        self.total_completion_tokens += completion_tokens
+        usage = getattr(self, "_usage_by_model", None)
+        if usage is None:
+            usage = self._usage_by_model = {}
+        counts = usage.setdefault(self.model, {"prompt_tokens": 0, "completion_tokens": 0})
+        counts["prompt_tokens"] += prompt_tokens
+        counts["completion_tokens"] += completion_tokens
 
     def chat(
         self,
@@ -180,8 +224,7 @@ class LLM:
                 args = {}
             parsed.append(ToolCall(id=raw["id"], name=raw["name"], arguments=args))
 
-        self.total_prompt_tokens += prompt_tok
-        self.total_completion_tokens += completion_tok
+        self._record_usage(prompt_tok, completion_tok)
 
         return LLMResponse(
             content="".join(content_parts),
@@ -236,6 +279,7 @@ class LiteLLM(LLM):
         self.extra = kwargs
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self._usage_by_model: dict[str, dict[str, int]] = {}
 
     def chat(
         self,
@@ -300,8 +344,7 @@ class LiteLLM(LLM):
                 args = {}
             parsed.append(ToolCall(id=raw["id"], name=raw["name"], arguments=args))
 
-        self.total_prompt_tokens += prompt_tok
-        self.total_completion_tokens += completion_tok
+        self._record_usage(prompt_tok, completion_tok)
 
         return LLMResponse(
             content="".join(content_parts),

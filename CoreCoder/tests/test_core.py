@@ -1,5 +1,7 @@
 """Tests for core modules: config, context, session, imports."""
 
+import os
+
 from corecoder import Agent, LLM, Config, ALL_TOOLS, __version__
 from corecoder import session as session_module
 from corecoder.context import ContextManager, estimate_tokens
@@ -20,16 +22,26 @@ def test_public_api_exports():
     assert len(ALL_TOOLS) == 7
 
 
-def test_config_from_env(monkeypatch):
+def _isolate_config_environment(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for name in list(os.environ):
+        if name.startswith("CORECODER_FALLBACK_"):
+            monkeypatch.delenv(name)
+
+
+def test_config_from_env(tmp_path, monkeypatch):
+    _isolate_config_environment(tmp_path, monkeypatch)
     monkeypatch.setenv("CORECODER_MODEL", "test-model")
     c = Config.from_env()
     assert c.model == "test-model"
 
 
-def test_config_defaults(monkeypatch):
+def test_config_defaults(tmp_path, monkeypatch):
+    _isolate_config_environment(tmp_path, monkeypatch)
     # clear relevant env vars without leaking the change into other tests
     monkeypatch.delenv("CORECODER_MODEL", raising=False)
     monkeypatch.delenv("CORECODER_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("CORECODER_TEMPERATURE", raising=False)
 
     c = Config.from_env()
     assert c.model == "gpt-5.5"

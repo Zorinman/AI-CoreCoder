@@ -5,18 +5,20 @@
 ## 总览
 
 ```text
-Config -> LLM / LiteLLM -> Agent
-                         |-> messages: list[dict]
-                         |-> ContextManager
-                         |-> Tool 列表
+Config -> LLM / LiteLLM -> ModelChain -> Agent
+                           |-> BudgetState
+                                           |-> messages: list[dict]
+                                           |-> ContextManager
+                                           |-> Tool 列表
 
-LLM.chat() -> LLMResponse -> ToolCall[] -> Tool.execute()
-                                      -> 工具结果写回 messages
+Agent.chat() -> ModelChain.chat() -> 当前 LLM.chat() -> LLMResponse
+                                                    -> ToolCall[] -> Tool.execute()
+                                                                  -> 工具结果写回 messages
 ```
 
 | 分类             | 结构                                                                                                     |
 | ---------------- | -------------------------------------------------------------------------------------------------------- |
-| 配置与模型通信   | `Config`、`ToolCall`、`LLMResponse`、`LLM`、`LiteLLM`                                                    |
+| 配置与模型通信   | `Config`、`ModelConfig`、`BudgetState`、`ModelChain`、`ToolCall`、`LLMResponse`、`LLM`、`LiteLLM`         |
 | Agent 运行状态   | `Agent`、`ContextManager`、消息字典、会话 JSON                                                           |
 | 工具体系         | `Tool`、`BashTool`、`ReadFileTool`、`WriteFileTool`、`EditFileTool`、`GlobTool`、`GrepTool`、`AgentTool` |
 | 共享注册表与状态 | `ALL_TOOLS`、`_tool_by_name`、`_changed_files`、`_local`、`_PRICING` 等                                  |
@@ -31,13 +33,18 @@ LLM.chat() -> LLMResponse -> ToolCall[] -> Tool.execute()
 | -------------------- | ------- | ---------------------------------- |
 | `model`              | `str`   | 模型名，默认 `gpt-5.5`             |
 | `api_key`            | `str`   | API Key                            |
-| `base_url`           | `str    | None`                              | OpenAI 兼容接口地址 |
+| `base_url`           | `str \| None` | OpenAI 兼容接口地址 |
 | `max_tokens`         | `int`   | 单次模型输出上限                   |
 | `temperature`        | `float` | 模型采样温度                       |
 | `max_context_tokens` | `int`   | Agent 上下文上限                   |
 | `provider`           | `str`   | 后端类型，如 `openai` 或 `litellm` |
+| `max_cost_usd`       | `float \| None` | 单个进程的硬预算上限（美元） |
+| `fallbacks`          | `list[ModelConfig]` | 按顺序解析的备用模型级别 |
 
-`Config.from_env()` 从 `.env` 和环境变量创建它。CLI 参数会在创建 `LLM` 前覆盖对应字段。
+`Config.from_env()` 是环境变量配置的唯一入口：它从 `.env` 和进程环境读取主模型、
+`CORECODER_MAX_COST_USD` 与连续编号的 `CORECODER_FALLBACK_<N>_*` 备用级别。每一级
+必须包含 `MODEL` 与直接保存密钥的 `API_KEY`；`PROVIDER` 和 `BASE_URL` 可选。CLI 参数
+只覆盖主模型字段，备用链顺序和预算由已解析的 `Config` 保持。
 
 ### 2. `ToolCall`
 
@@ -84,6 +91,17 @@ class ToolCall:
 两者对外都提供 `chat(messages, tools, on_token)`，并都返回 `LLMResponse`。因此 `Agent` 不需要区分具体供应商。
 
 它们主要保存：模型名、额外请求配置、累计输入 Token、累计输出 Token；`LLM` 还保存 OpenAI 客户端，`LiteLLM` 保存 API Key 和 Base URL。
+
+### 5. `ModelChain` 与 `BudgetState`
+
+定义位置：[fallback.py](../CoreCoder/corecoder/fallback.py)。`ModelChain` 是交给 `Agent`
+的模型外观：它持有主模型和有序备用模型，维护当前生效级别与熔断状态，并将总 Token
+用量和已知模型的估算成本汇总到链级别。模型自身的三次重试仍由 `LLM` 或 `LiteLLM`
+负责；某一级耗尽重试后，链才进入下一备用级别。
+
+`BudgetState` 保存单进程的硬预算上限。CLI 使用 `Config.max_cost_usd` 创建它并注入
+`ModelChain`；成本超过上限时，链拒绝新的模型请求。未知价格的当前模型无法安全估算，
+因此预算检查放行。`/budget` 只能在当前进程中调高该上限。
 
 ## 二、Agent 运行状态与持久化数据
 
@@ -205,12 +223,13 @@ class ToolCall:
 
 ### 关系总结
 
-1. `Config` 决定创建哪种 `LLM`。
-2. `Agent` 持有 `LLM`、`ContextManager`、工具列表和消息列表。
-3. `LLM` 将供应商流式响应解析为 `LLMResponse`；其中的 `ToolCall` 指向某个 `Tool`。
-4. `Agent` 通过 `_tool_by_name` 找到工具，执行后把工具结果字典写回 `messages`。
-5. 多个 `tool_calls` 会先按 `Tool.concurrency_safe` 分段，再分别用线程池并发或直接串行执行，结果仍按原始调用顺序写回 `messages`。
-6. `ContextManager` 在需要时压缩同一个 `messages` 列表；会话功能将该列表持久化为 JSON。
+1. `Config` 决定主模型、备用级别和硬预算上限；CLI 据此创建 `LLM` 或 `LiteLLM`、`BudgetState` 与 `ModelChain`。
+2. `Agent` 持有 `ModelChain`、`ContextManager`、工具列表和消息列表；子 Agent 复用同一条 `ModelChain`，因而共享熔断与预算状态。
+3. `ModelChain` 在每个模型自身重试耗尽后按顺序路由到下一级，并在成功降级后保持该当前级别；`/model` 会重置熔断状态。
+4. 当前 `LLM` 将供应商流式响应解析为 `LLMResponse`；其中的 `ToolCall` 指向某个 `Tool`。
+5. `Agent` 通过 `_tool_by_name` 找到工具，执行后把工具结果字典写回 `messages`。
+6. 多个 `tool_calls` 会先按 `Tool.concurrency_safe` 分段，再分别用线程池并发或直接串行执行，结果仍按原始调用顺序写回 `messages`。
+7. `ContextManager` 在需要时压缩同一个 `messages` 列表；会话功能将该列表持久化为 JSON。
 
 ## 五、数据结构定义源码
 
@@ -233,6 +252,16 @@ class Config:
     temperature: float = 0.0
     max_context_tokens: int = 128_000
     provider: str = "openai"
+    max_cost_usd: float | None = None
+    fallbacks: list[ModelConfig] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    model: str
+    api_key: str
+    base_url: str | None = None
+    provider: str = "openai"
 
 
 @dataclass
@@ -252,9 +281,12 @@ class LLMResponse:
 
 ### 2. 运行协调对象的构造函数
 
-来源：[llm.py](../CoreCoder/corecoder/llm.py)、[agent.py](../CoreCoder/corecoder/agent.py)、[context.py](../CoreCoder/corecoder/context.py)。
+来源：[llm.py](../CoreCoder/corecoder/llm.py)、[fallback.py](../CoreCoder/corecoder/fallback.py)、[agent.py](../CoreCoder/corecoder/agent.py)、[context.py](../CoreCoder/corecoder/context.py)。
 
 ```python
+from typing import Any, Sequence
+
+
 class LLM:
     def __init__(
         self,
@@ -289,6 +321,22 @@ class LiteLLM(LLM):
         self.total_completion_tokens = 0
 
 
+class BudgetState:
+    def __init__(self, limit_usd: float | None = None):
+        self.limit_usd = limit_usd
+
+
+class ModelChain:
+    def __init__(
+        self,
+        primary: Any = None,
+        fallbacks: Sequence[Any] | None = None,
+        *,
+        budget: BudgetState | None = None,
+    ):
+        ...
+
+
 class ContextManager:
     def __init__(self, max_tokens: int = 128_000):
         self.max_tokens = max_tokens
@@ -300,12 +348,14 @@ class ContextManager:
 class Agent:
     def __init__(
         self,
-        llm: LLM,
+        llm: LLM | ModelChain,
         tools: list[Tool] | None = None,
         max_context_tokens: int = 128_000,
         max_rounds: int = 50,
+        model_chain: ModelChain | None = None,
     ):
-        self.llm = llm
+        self.llm = model_chain if model_chain is not None else llm
+        self.model_chain = self.llm if isinstance(self.llm, ModelChain) else model_chain
         self.tools = tools if tools is not None else ALL_TOOLS
         self._tool_by_name = {t.name: t for t in self.tools}
         self.messages: list[dict] = []
@@ -518,6 +568,8 @@ _PRICING = {
 | `/model` | 显示当前模型。 |
 | `/model <name>` | 在当前进程中切换模型。 |
 | `/tokens` | 显示累计输入、输出 Token 及可用时的费用估算。 |
+| `/budget` | 显示当前硬预算上限；未配置时显示无限制。 |
+| `/budget <usd>` | 将硬预算上限调高为指定的非负美元金额。 |
 | `/compact` | 对当前对话历史执行上下文压缩，并显示压缩前后的估算 Token 数。 |
 | `/diff` | 显示当前会话修改过的文件。 |
 | `/save` | 将当前会话保存到磁盘。 |
@@ -528,7 +580,7 @@ _PRICING = {
 
 ## 3. 两类命令的边界
 
-启动参数用于确定初始配置、恢复会话和选择运行模式；交互内置命令用于操作已创建的 `Agent`、`LLM` 和会话状态。`/model <name>` 可以改变当前运行中的模型，但不修改下一次启动时使用的环境变量或配置文件。
+启动参数用于确定初始配置、恢复会话和选择运行模式；交互内置命令用于操作已创建的 `Agent`、`ModelChain`、预算状态和会话状态。`/model <name>` 可以改变主模型并重置熔断状态，但不修改下一次启动时使用的环境变量或配置文件；`/budget <usd>` 只能调高当前进程的硬预算上限。
 
 # CoreCoder 调用路径图
 
@@ -538,8 +590,11 @@ _PRICING = {
 %%{init: {"flowchart": {"curve": "linear"}}}%%
 flowchart LR
     U["用户"] --> CLI["CLI"]
+    CLI --> CFG["Config"]
+    CFG --> CHAIN["ModelChain + BudgetState"]
     CLI --> A["Agent"]
-    A --> LLM["LLM 抽象层"]
+    A --> CHAIN
+    CHAIN --> LLM["当前 LLM 抽象层"]
     LLM -->|OpenAI| OAI["OpenAI 兼容接口"]
     LLM -->|LiteLLM| LITE["LiteLLM 接口"]
     OAI --> RESP["LLMResponse"]
@@ -554,9 +609,11 @@ flowchart LR
 | 节点            | 功能                                            |
 | --------------- | ----------------------------------------------- |
 | 用户            | 提交问题并接收最终回复。                        |
-| CLI             | 接收输入，调用 Agent，并向用户显示结果。        |
-| Agent           | 管理消息历史，调用 LLM，分派 Tool，并控制循环。 |
-| LLM 抽象层      | 统一封装不同模型后端的调用方式。                |
+| CLI             | 读取 Config，创建模型链，接收输入并显示结果。   |
+| Config          | 集中解析主模型、备用级别和硬预算。              |
+| ModelChain + BudgetState | 在预算允许时选择当前模型，并维护降级与熔断状态。 |
+| Agent           | 管理消息历史，经模型链发起请求，分派 Tool 并控制循环。 |
+| 当前 LLM 抽象层 | 统一封装当前模型后端的调用方式。                |
 | OpenAI 兼容接口 | 调用 OpenAI 或兼容 OpenAI 协议的模型服务。      |
 | LiteLLM 接口    | 通过 LiteLLM 调用其他模型供应商。               |
 | LLMResponse     | 保存 LLM 返回的文本、ToolCall 和 Token 信息。   |
@@ -580,13 +637,19 @@ flowchart TD
     COMPRESS -->|"NO"| REQUEST["准备消息和 Tool Schema"]
     DOCOMPRESS --> REQUEST
 
-    REQUEST --> BACKEND{"使用 LiteLLM？"}
+    REQUEST --> CHAIN["ModelChain 检查预算并选择当前模型"]
+    CHAIN --> BUDGET{"预算允许请求？"}
+    BUDGET -->|"NO"| LIMIT["返回硬预算提示"]
+    LIMIT --> OUTPUT
+    BUDGET -->|"YES"| BACKEND{"当前级别使用 LiteLLM？"}
     BACKEND -->|"YES"| LITE["调用 LiteLLM"]
     BACKEND -->|"NO"| OPENAI["调用 OpenAI 兼容接口"]
     LITE --> SUCCESS{"LLM 调用成功？"}
     OPENAI --> SUCCESS
 
-    SUCCESS -->|"NO"| LLMERR["CLI 显示错误"]
+    SUCCESS -->|"NO"| FALLBACK{"还有备用级别？"}
+    FALLBACK -->|"YES"| BACKEND
+    FALLBACK -->|"NO"| LLMERR["返回降级链耗尽错误"]
     LLMERR --> ENDERR(["结束本轮"])
     SUCCESS -->|"YES"| HASTOOL{"包含 ToolCall？"}
 
@@ -621,14 +684,18 @@ sequenceDiagram
     actor User as 用户
     participant CLI as CLI
     participant Agent as Agent
+    participant Chain as ModelChain
     participant LLM as LLM
     participant Tool as Tool
     participant Sub as 子 Agent
 
     User->>CLI: 提交问题
     CLI->>Agent: chat(question)
-    Agent->>LLM: 发送消息和工具定义
-    LLM-->>Agent: 返回文本或 ToolCall
+    Agent->>Chain: 发送消息和工具定义
+    Note over Chain,LLM: 检查预算；当前级别失败时按顺序降级
+    Chain->>LLM: 调用当前模型
+    LLM-->>Chain: 返回文本或 ToolCall
+    Chain-->>Agent: 返回响应
 
     alt 返回最终文本
         Agent-->>CLI: 返回最终回复
@@ -636,8 +703,10 @@ sequenceDiagram
     else 一个普通 ToolCall
         Agent->>Tool: 串行执行
         Tool-->>Agent: 返回工具结果
-        Agent->>LLM: 携带工具结果再次请求
-        LLM-->>Agent: 返回最终文本
+        Agent->>Chain: 携带工具结果再次请求
+        Chain->>LLM: 调用当前模型
+        LLM-->>Chain: 返回最终文本
+        Chain-->>Agent: 返回最终文本
         Agent-->>CLI: 返回最终回复
         CLI-->>User: 显示回复
     else 多个 ToolCall
@@ -647,17 +716,23 @@ sequenceDiagram
             Agent->>Tool: 执行工具 2
         end
         Tool-->>Agent: 返回全部工具结果
-        Agent->>LLM: 携带工具结果再次请求
-        LLM-->>Agent: 返回最终文本
+        Agent->>Chain: 携带工具结果再次请求
+        Chain->>LLM: 调用当前模型
+        LLM-->>Chain: 返回最终文本
+        Chain-->>Agent: 返回最终文本
         Agent-->>CLI: 返回最终回复
         CLI-->>User: 显示回复
     else agent ToolCall
         Agent->>Sub: 派发子任务
-        Sub->>LLM: 独立上下文中请求
-        LLM-->>Sub: 子任务结果
+        Sub->>Chain: 独立上下文中请求（共享模型链）
+        Chain->>LLM: 调用当前模型
+        LLM-->>Chain: 子任务结果
+        Chain-->>Sub: 子任务结果
         Sub-->>Agent: 返回子 Agent 结果
-        Agent->>LLM: 携带子 Agent 结果再次请求
-        LLM-->>Agent: 返回最终文本
+        Agent->>Chain: 携带子 Agent 结果再次请求
+        Chain->>LLM: 调用当前模型
+        LLM-->>Chain: 返回最终文本
+        Chain-->>Agent: 返回最终文本
         Agent-->>CLI: 返回最终回复
         CLI-->>User: 显示回复
     end

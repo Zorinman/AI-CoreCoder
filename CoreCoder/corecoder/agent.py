@@ -17,17 +17,20 @@ from .tools.base import Tool
 from .tools.agent import AgentTool
 from .prompt import system_prompt
 from .context import ContextManager
+from .fallback import BudgetExceededError, ModelChain
 
 
 class Agent:
     def __init__(
         self,
-        llm: LLM,
+        llm: LLM | ModelChain,
         tools: list[Tool] | None = None,
         max_context_tokens: int = 128_000,
         max_rounds: int = 50,
+        model_chain: ModelChain | None = None,
     ):
-        self.llm = llm
+        self.llm = model_chain if model_chain is not None else llm
+        self.model_chain = self.llm if isinstance(self.llm, ModelChain) else model_chain
         self.tools = tools if tools is not None else ALL_TOOLS
         self._tool_by_name = {t.name: t for t in self.tools}
         self.messages: list[dict] = []
@@ -52,11 +55,19 @@ class Agent:
         self.context.maybe_compress(self.messages, self.llm)
 
         for _ in range(self.max_rounds):
-            resp = self.llm.chat(
-                messages=self._full_messages(),
-                tools=self._tool_schemas(),
-                on_token=on_token,
-            )
+            try:
+                if hasattr(self.llm, "can_start_request") and not self.llm.can_start_request():
+                    return (
+                        f"Estimated cost ${self.llm.estimated_cost:.6f} exceeds the hard budget "
+                        f"of ${self.llm.budget.limit_usd:.6f}. Use /budget <amount> to increase it."
+                    )
+                resp = self.llm.chat(
+                    messages=self._full_messages(),
+                    tools=self._tool_schemas(),
+                    on_token=on_token,
+                )
+            except BudgetExceededError as exc:
+                return str(exc)
 
             # no tool calls -> LLM is done, return text
             if not resp.tool_calls:
@@ -178,3 +189,10 @@ class Agent:
     def reset(self):
         """Clear conversation history."""
         self.messages.clear()
+
+    def switch_model(self, model: str) -> None:
+        """Explicit model selection also clears a fallback circuit breaker."""
+        if hasattr(self.llm, "set_model"):
+            self.llm.set_model(model)
+        else:
+            self.llm.model = model

@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .fallback import ModelChain
     from .llm import LLM
 
 
@@ -42,7 +43,7 @@ class ContextManager:
         self._summarize_at = int(max_tokens * 0.70)  # 70% -> LLM summarize
         self._collapse_at = int(max_tokens * 0.90)   # 90% -> hard collapse
 
-    def maybe_compress(self, messages: list[dict], llm: LLM | None = None) -> bool:
+    def maybe_compress(self, messages: list[dict], llm: LLM | ModelChain | None = None) -> bool:
         """Apply compression layers as needed. Returns True if any compression happened."""
         current = estimate_tokens(messages)
         compressed = False
@@ -106,7 +107,7 @@ class ContextManager:
             split -= 1
         return split
 
-    def _summarize_old(self, messages: list[dict], llm: LLM | None,
+    def _summarize_old(self, messages: list[dict], llm: LLM | ModelChain | None,
                        keep_recent: int = 8) -> bool:
         """Layer 2: Summarize old conversation, keep recent messages intact."""
         if len(messages) <= keep_recent:
@@ -130,7 +131,7 @@ class ContextManager:
         messages.extend(tail)
         return True
 
-    def _hard_collapse(self, messages: list[dict], llm: LLM | None):
+    def _hard_collapse(self, messages: list[dict], llm: LLM | ModelChain | None):
         """Layer 3: Emergency compression. Keep only last 4 messages + summary."""
         split = self._safe_split(messages, 4 if len(messages) > 4 else 2)
         tail = messages[split:]
@@ -147,7 +148,7 @@ class ContextManager:
         })
         messages.extend(tail)
 
-    def _get_summary(self, messages: list[dict], llm: LLM | None) -> str:
+    def _get_summary(self, messages: list[dict], llm: LLM | ModelChain | None) -> str:
         """Generate summary via LLM or fallback to extraction."""
         flat = self._flatten(messages)
 

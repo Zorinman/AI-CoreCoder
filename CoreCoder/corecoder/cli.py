@@ -13,7 +13,8 @@ from prompt_toolkit.key_binding import KeyBindings
 
 from .agent import Agent
 from .llm import LLM, LiteLLM
-from .config import Config
+from .config import Config, ConfigError
+from .fallback import BudgetState, ModelChain
 from .session import save_session, load_session, list_sessions
 from . import __version__
 
@@ -36,7 +37,11 @@ def _parse_args():
 
 def main():
     args = _parse_args()
-    config = Config.from_env()
+    try:
+        config = Config.from_env()
+    except ConfigError as exc:
+        console.print(f"[red]Invalid fallback configuration: {exc}[/red]")
+        sys.exit(2)
 
     # CLI args override env vars
     if args.model:
@@ -49,7 +54,7 @@ def main():
     if not config.api_key:
         console.print("[red bold]No API key found.[/]")
         console.print(
-            "Set one of: OPENAI_API_KEY, DEEPSEEK_API_KEY, or CORECODER_API_KEY\n"
+            "Set one of: OPENAI_API_KEY or CORECODER_API_KEY\n"
             "\nExamples:\n"
             "  # OpenAI\n"
             "  export OPENAI_API_KEY=sk-...\n"
@@ -70,7 +75,8 @@ def main():
         temperature=config.temperature,
         max_tokens=config.max_tokens,
     )
-    agent = Agent(llm=llm, max_context_tokens=config.max_context_tokens)
+    chain = ModelChain(primary=llm, fallbacks=config.fallbacks, budget=BudgetState(config.max_cost_usd))
+    agent = Agent(llm=chain, max_context_tokens=config.max_context_tokens)
 
     # resume saved session
     if args.resume:
@@ -173,14 +179,30 @@ def _repl(agent: Agent, config: Config):
                 line += f"  (~${cost:.4f})"
             console.print(line)
             continue
+        if user_input == "/budget" or user_input.startswith("/budget "):
+            raw_limit = user_input[7:].strip() if user_input.startswith("/budget ") else ""
+            if not raw_limit:
+                current = agent.llm.budget.limit_usd
+                console.print(
+                    f"Budget: [cyan]${current:.6f}[/cyan]" if current is not None else "Budget: [dim]unlimited[/dim]"
+                )
+                continue
+            try:
+                new_limit = float(raw_limit)
+                agent.llm.set_budget_limit(new_limit, only_increase=True)
+            except (TypeError, ValueError) as exc:
+                console.print(f"[red]Invalid budget: {exc}[/red]")
+            else:
+                console.print(f"Budget limit set to [cyan]${new_limit:.6f}[/cyan]")
+            continue
         if user_input == "/model" or user_input.startswith("/model "):
             new_model = user_input[7:].strip() if user_input.startswith("/model ") else ""
             if new_model:
-                agent.llm.model = new_model
+                agent.switch_model(new_model)
                 config.model = new_model
                 console.print(f"Switched to [cyan]{new_model}[/cyan]")
             else:
-                console.print(f"Current model: [cyan]{config.model}[/cyan]")
+                console.print(f"Current model: [cyan]{agent.llm.model}[/cyan]")
             continue
         if user_input == "/compact":
             from .context import estimate_tokens
@@ -251,6 +273,8 @@ def _show_help():
         "  /model         Show current model\n"
         "  /model <name>  Switch model mid-conversation\n"
         "  /tokens        Show token usage\n"
+        "  /budget        Show budget limit\n"
+        "  /budget <usd>  Increase budget limit\n"
         "  /compact       Compress conversation context\n"
         "  /diff          Show files modified this session\n"
         "  /save          Save session to disk\n"

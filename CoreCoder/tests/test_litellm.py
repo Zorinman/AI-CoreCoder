@@ -1,5 +1,6 @@
 """Tests for the LiteLLM backend."""
 
+import os
 import types as builtin_types
 from unittest import mock
 
@@ -208,7 +209,11 @@ class TestConfigProvider:
         config = Config()
         assert config.provider == "openai"
 
-    def test_provider_from_env(self):
+    def test_provider_from_env(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        for name in list(os.environ):
+            if name.startswith("CORECODER_FALLBACK_"):
+                monkeypatch.delenv(name)
         with mock.patch.dict("os.environ", {"CORECODER_PROVIDER": "litellm"}, clear=False):
             config = Config.from_env()
             assert config.provider == "litellm"
