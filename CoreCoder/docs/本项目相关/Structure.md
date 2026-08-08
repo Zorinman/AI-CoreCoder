@@ -5,11 +5,12 @@
 ## 总览
 
 ```text
-Config -> LLM / LiteLLM -> ModelChain -> Agent
-                           |-> BudgetState
-                                           |-> messages: list[dict]
-                                           |-> ContextManager
-                                           |-> Tool 列表
+Config -- ModelChain.from_config() -> ModelChain -> Agent
+                                      |-> 当前 LLM / LiteLLM
+                                      |-> BudgetState
+                                                   |-> messages: list[dict]
+                                                   |-> ContextManager
+                                                   |-> Tool 列表
 
 Agent.chat() -> ModelChain.chat() -> 当前 LLM.chat() -> LLMResponse
                                                     -> ToolCall[] -> Tool.execute()
@@ -27,24 +28,18 @@ Agent.chat() -> ModelChain.chat() -> 当前 LLM.chat() -> LLMResponse
 
 ### 1. `Config`
 
-定义位置：[config.py](../CoreCoder/corecoder/config.py)。这是一个 `@dataclass`，集中保存启动配置。
+定义位置：[config.py](../../corecoder/config.py)。这是一个不可变的 `@dataclass`，集中保存已经解析完成的启动配置。
 
-| 字段                 | 类型    | 作用                               |
-| -------------------- | ------- | ---------------------------------- |
-| `model`              | `str`   | 模型名，默认 `gpt-5.5`             |
-| `api_key`            | `str`   | API Key                            |
-| `base_url`           | `str \| None` | OpenAI 兼容接口地址 |
-| `max_tokens`         | `int`   | 单次模型输出上限                   |
-| `temperature`        | `float` | 模型采样温度                       |
-| `max_context_tokens` | `int`   | Agent 上下文上限                   |
-| `provider`           | `str`   | 后端类型，如 `openai` 或 `litellm` |
-| `max_cost_usd`       | `float \| None` | 单个进程的硬预算上限（美元） |
-| `fallbacks`          | `list[ModelConfig]` | 按顺序解析的备用模型级别 |
+| 字段                 | 类型                        | 作用                                 |
+| -------------------- | --------------------------- | ------------------------------------ |
+| `primary`            | `ModelConfig`               | 已解析的主模型配置                   |
+| `fallbacks`          | `tuple[ModelConfig, ...]`   | 按顺序解析的备用模型配置             |
+| `max_context_tokens` | `int`                       | Agent 上下文上限                     |
+| `max_cost_usd`       | `float \| None`             | 单个进程的硬预算上限（美元）         |
 
-`Config.from_env()` 是环境变量配置的唯一入口：它从 `.env` 和进程环境读取主模型、
-`CORECODER_MAX_COST_USD` 与连续编号的 `CORECODER_FALLBACK_<N>_*` 备用级别。每一级
-必须包含 `MODEL` 与直接保存密钥的 `API_KEY`；`PROVIDER` 和 `BASE_URL` 可选。CLI 参数
-只覆盖主模型字段，备用链顺序和预算由已解析的 `Config` 保持。
+`Config.from_env()` 是环境变量配置的唯一入口。它只加载当前目录 `.env`，且不覆盖进程环境变量；随后解析 `CORECODER_PRIMARY_<FIELD>`、连续编号的 `CORECODER_FALLBACK_<N>_<FIELD>`、`CORECODER_MAX_CONTEXT_TOKENS` 与 `CORECODER_MAX_COST_USD`。每个已启用模型级别必须包含 `MODEL` 和显式 `API_KEY`，并可设置 `BACKEND`、`PROVIDER`、`BASE_URL`、`TEMPERATURE`、`MAX_TOKENS`。
+
+CLI 的 `--model`、`--base-url`、`--api-key` 仅作为主模型字段覆盖，在 `Config` 构造前参与解析。优先级为 CLI、进程环境变量、当前目录 `.env`、默认值。旧 `CORECODER_MODEL`、`OPENAI_API_KEY` 等变量会直接产生迁移错误。
 
 ### 2. `ToolCall`
 
@@ -90,18 +85,13 @@ class ToolCall:
 
 两者对外都提供 `chat(messages, tools, on_token)`，并都返回 `LLMResponse`。因此 `Agent` 不需要区分具体供应商。
 
-它们主要保存：模型名、额外请求配置、累计输入 Token、累计输出 Token；`LLM` 还保存 OpenAI 客户端，`LiteLLM` 保存 API Key 和 Base URL。
+它们主要保存模型名、额外请求配置和累计输入、输出 Token；`LLM` 还保存 OpenAI 客户端，`LiteLLM` 保存 API Key 和 Base URL。`has_known_cost` 是公开属性，用于告知预算层当前模型是否具备定价数据。
 
 ### 5. `ModelChain` 与 `BudgetState`
 
-定义位置：[fallback.py](../CoreCoder/corecoder/fallback.py)。`ModelChain` 是交给 `Agent`
-的模型外观：它持有主模型和有序备用模型，维护当前生效级别与熔断状态，并将总 Token
-用量和已知模型的估算成本汇总到链级别。模型自身的三次重试仍由 `LLM` 或 `LiteLLM`
-负责；某一级耗尽重试后，链才进入下一备用级别。
+`ModelChain` 定义在 [fallback.py](../../corecoder/fallback.py)，是交给 `Agent` 的模型外观。CLI 通过 `ModelChain.from_config(config)` 用同一工厂构造主模型和有序备用模型；`backend` 选择 `LLM` 或 `LiteLLM`，`provider` 不参与该选择。模型链维护当前生效级别与熔断状态，并把总 Token 用量和已知模型的估算成本汇总到链级别。模型自身的三次重试仍由 `LLM` 或 `LiteLLM` 负责；某一级耗尽重试后，链才进入下一备用级别。
 
-`BudgetState` 保存单进程的硬预算上限。CLI 使用 `Config.max_cost_usd` 创建它并注入
-`ModelChain`；成本超过上限时，链拒绝新的模型请求。未知价格的当前模型无法安全估算，
-因此预算检查放行。`/budget` 只能在当前进程中调高该上限。
+`BudgetState` 定义在 [budget.py](../../corecoder/budget.py)，只保存单进程的可变硬预算上限。`ModelChain.from_config()` 默认根据 `Config.max_cost_usd` 创建它；成本超过上限时，链拒绝新的模型请求。未知价格的当前模型通过 `has_known_cost` 标识，预算检查对此放行。`/budget` 只能在当前进程中调高该上限。
 
 ## 二、Agent 运行状态与持久化数据
 
@@ -223,7 +213,7 @@ class ToolCall:
 
 ### 关系总结
 
-1. `Config` 决定主模型、备用级别和硬预算上限；CLI 据此创建 `LLM` 或 `LiteLLM`、`BudgetState` 与 `ModelChain`。
+1. `Config` 决定主模型、备用级别和硬预算上限；CLI 通过 `ModelChain.from_config()` 创建主备客户端、`BudgetState` 与 `ModelChain`。
 2. `Agent` 持有 `ModelChain`、`ContextManager`、工具列表和消息列表；子 Agent 复用同一条 `ModelChain`，因而共享熔断与预算状态。
 3. `ModelChain` 在每个模型自身重试耗尽后按顺序路由到下一级，并在成功降级后保持该当前级别；`/model` 会重置熔断状态。
 4. 当前 `LLM` 将供应商流式响应解析为 `LLMResponse`；其中的 `ToolCall` 指向某个 `Tool`。
@@ -237,31 +227,31 @@ class ToolCall:
 
 ### 1. 数据类
 
-来源：[config.py](../CoreCoder/corecoder/config.py) 与 [llm.py](../CoreCoder/corecoder/llm.py)。
+来源：[config.py](../../corecoder/config.py) 与 [llm.py](../../corecoder/llm.py)。以下省略校验与摘要方法，只保留字段结构。
 
 ```python
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-
-
-@dataclass
-class Config:
-    model: str = "gpt-5.5"
-    api_key: str = ""
-    base_url: str | None = None
-    max_tokens: int = 4096
-    temperature: float = 0.0
-    max_context_tokens: int = 128_000
-    provider: str = "openai"
-    max_cost_usd: float | None = None
-    fallbacks: list[ModelConfig] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class ModelConfig:
     model: str
     api_key: str
-    base_url: str | None = None
+    backend: str = "openai_compatible"
     provider: str = "openai"
+    base_url: str | None = None
+    temperature: float = 0.0
+    max_tokens: int = 4096
+
+
+@dataclass(frozen=True)
+class Config:
+    primary: ModelConfig
+    fallbacks: tuple[ModelConfig, ...] = ()
+    max_context_tokens: int = 128_000
+    max_cost_usd: float | None = None
 
 
 @dataclass
@@ -281,10 +271,10 @@ class LLMResponse:
 
 ### 2. 运行协调对象的构造函数
 
-来源：[llm.py](../CoreCoder/corecoder/llm.py)、[fallback.py](../CoreCoder/corecoder/fallback.py)、[agent.py](../CoreCoder/corecoder/agent.py)、[context.py](../CoreCoder/corecoder/context.py)。
+来源：[llm.py](../../corecoder/llm.py)、[fallback.py](../../corecoder/fallback.py)、[budget.py](../../corecoder/budget.py)、[agent.py](../../corecoder/agent.py)、[context.py](../../corecoder/context.py)。
 
 ```python
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 
 class LLM:
@@ -325,6 +315,9 @@ class BudgetState:
     def __init__(self, limit_usd: float | None = None):
         self.limit_usd = limit_usd
 
+    def set_limit(self, value: float, *, only_increase: bool = False) -> float:
+        ...
+
 
 class ModelChain:
     def __init__(
@@ -332,8 +325,21 @@ class ModelChain:
         primary: Any = None,
         fallbacks: Sequence[Any] | None = None,
         *,
+        llm: Any = None,
+        models: Sequence[Any] | None = None,
         budget: BudgetState | None = None,
+        llm_factory: Callable[..., Any] | None = None,
     ):
+        ...
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Config,
+        *,
+        budget: BudgetState | None = None,
+        llm_factory: Callable[[ModelConfig], Any] | None = None,
+    ) -> "ModelChain":
         ...
 
 
@@ -548,11 +554,11 @@ _PRICING = {
 
 | 参数 | 作用 | 生效方式 |
 | --- | --- | --- |
-| `-m`, `--model` | 指定模型名 | 覆盖环境变量加载的 `Config.model`。 |
-| `--base-url` | 指定 OpenAI 兼容 API 地址 | 覆盖 `Config.base_url`。 |
-| `--api-key` | 指定 API Key | 覆盖 `Config.api_key`。 |
+| `-m`, `--model` | 指定主模型名 | 在构造 `Config.primary` 前覆盖 `CORECODER_PRIMARY_MODEL`。 |
+| `--base-url` | 指定主模型 API 地址 | 在构造 `Config.primary` 前覆盖 `CORECODER_PRIMARY_BASE_URL`。 |
+| `--api-key` | 指定主模型 API Key | 在构造 `Config.primary` 前覆盖 `CORECODER_PRIMARY_API_KEY`。 |
 | `-p`, `--prompt` | 提供单次提示词 | 调用一次 `Agent.chat()` 后退出，不进入交互 REPL。 |
-| `-r`, `--resume ID` | 恢复已保存会话 | 加载 `messages` 和保存时的模型；指定 `--model` 时优先使用该参数。 |
+| `-r`, `--resume ID` | 恢复已保存会话 | 加载 `messages` 和显式运行时模型覆盖；指定 `--model` 时优先使用该参数。 |
 | `-v`, `--version` | 显示版本 | 由 `argparse` 输出版本并结束程序。 |
 
 例如，`corecoder --model gpt-5.4 --resume session_123` 在启动时设置模型并恢复会话。

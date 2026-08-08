@@ -25,28 +25,27 @@ def test_public_api_exports():
 def _isolate_config_environment(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     for name in list(os.environ):
-        if name.startswith("CORECODER_FALLBACK_"):
+        if name.startswith("CORECODER_") or name in {"OPENAI_API_KEY", "OPENAI_BASE_URL"}:
             monkeypatch.delenv(name)
 
 
 def test_config_from_env(tmp_path, monkeypatch):
     _isolate_config_environment(tmp_path, monkeypatch)
-    monkeypatch.setenv("CORECODER_MODEL", "test-model")
+    monkeypatch.setenv("CORECODER_PRIMARY_MODEL", "test-model")
+    monkeypatch.setenv("CORECODER_PRIMARY_API_KEY", "test-key")
     c = Config.from_env()
-    assert c.model == "test-model"
+    assert c.primary.model == "test-model"
 
 
 def test_config_defaults(tmp_path, monkeypatch):
     _isolate_config_environment(tmp_path, monkeypatch)
-    # clear relevant env vars without leaking the change into other tests
-    monkeypatch.delenv("CORECODER_MODEL", raising=False)
-    monkeypatch.delenv("CORECODER_MAX_TOKENS", raising=False)
-    monkeypatch.delenv("CORECODER_TEMPERATURE", raising=False)
+    monkeypatch.setenv("CORECODER_PRIMARY_MODEL", "test-model")
+    monkeypatch.setenv("CORECODER_PRIMARY_API_KEY", "test-key")
 
     c = Config.from_env()
-    assert c.model == "gpt-5.5"
-    assert c.max_tokens == 4096
-    assert c.temperature == 0.0
+    assert c.primary.max_tokens == 4096
+    assert c.primary.temperature == 0.0
+    assert c.max_context_tokens == 128_000
 
 
 # --- Context ---
@@ -161,6 +160,18 @@ def test_cost_estimation_unknown_model():
     llm.total_prompt_tokens = 1000
     llm.total_completion_tokens = 500
     assert llm.estimated_cost is None
+
+
+def test_cost_knowledge_is_exposed_by_the_llm_interface():
+    from corecoder.llm import LLM
+
+    known = LLM.__new__(LLM)
+    known.model = "gpt-5.4"
+    unknown = LLM.__new__(LLM)
+    unknown.model = "private-model"
+
+    assert known.has_known_cost is True
+    assert unknown.has_known_cost is False
 
 
 # --- Changed files tracking ---

@@ -7,7 +7,7 @@ from unittest import mock
 import pytest
 
 from corecoder.llm import LLM, LiteLLM, LLMResponse
-from corecoder.config import Config
+from corecoder.config import Config, ModelConfig
 
 
 # ---------------------------------------------------------------------------
@@ -206,23 +206,35 @@ class TestChat:
 
 class TestConfigProvider:
     def test_default_provider_is_openai(self):
-        config = Config()
-        assert config.provider == "openai"
+        config = Config(primary=ModelConfig(model="test", api_key="key"))
+        assert config.primary.provider == "openai"
 
     def test_provider_from_env(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         for name in list(os.environ):
-            if name.startswith("CORECODER_FALLBACK_"):
+            if name.startswith("CORECODER_") or name in {"OPENAI_API_KEY", "OPENAI_BASE_URL"}:
                 monkeypatch.delenv(name)
-        with mock.patch.dict("os.environ", {"CORECODER_PROVIDER": "litellm"}, clear=False):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "CORECODER_PRIMARY_MODEL": "anthropic/claude-3-haiku",
+                "CORECODER_PRIMARY_API_KEY": "key",
+                "CORECODER_PRIMARY_BACKEND": "litellm",
+                "CORECODER_PRIMARY_PROVIDER": "anthropic",
+            },
+            clear=False,
+        ):
             config = Config.from_env()
-            assert config.provider == "litellm"
+            assert config.primary.provider == "anthropic"
 
     def test_cli_picks_litellm_class(self):
-        from corecoder.llm import LiteLLM
-        config = Config(provider="litellm", model="anthropic/claude-3-haiku", api_key="k")
-        llm_cls = LiteLLM if config.provider == "litellm" else LLM
-        assert llm_cls is LiteLLM
+        from corecoder.fallback import ModelChain
+
+        config = Config(primary=ModelConfig(
+            backend="litellm", provider="anthropic", model="anthropic/claude-3-haiku", api_key="k"
+        ))
+        chain = ModelChain.from_config(config)
+        assert isinstance(chain.current, LiteLLM)
 
 
 # ---------------------------------------------------------------------------

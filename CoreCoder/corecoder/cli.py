@@ -12,9 +12,8 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 
 from .agent import Agent
-from .llm import LLM, LiteLLM
 from .config import Config, ConfigError
-from .fallback import BudgetState, ModelChain
+from .fallback import ModelChain
 from .session import save_session, load_session, list_sessions
 from . import __version__
 
@@ -24,69 +23,42 @@ console = Console()
 def _parse_args():
     p = argparse.ArgumentParser(
         prog="corecoder",
-        description="Minimal AI coding agent. Works with any OpenAI-compatible LLM.",
+        description="ZorinHelper AI coding agent. Works with any OpenAI-compatible LLM.",
     )
-    p.add_argument("-m", "--model", help="Model name (default: $CORECODER_MODEL or gpt-5.5)")
-    p.add_argument("--base-url", help="API base URL (default: $OPENAI_BASE_URL)")
-    p.add_argument("--api-key", help="API key (default: $OPENAI_API_KEY)")
+    p.add_argument("-m", "--model", help="Primary model name (overrides $CORECODER_PRIMARY_MODEL)")
+    p.add_argument("--base-url", help="Primary API base URL (overrides $CORECODER_PRIMARY_BASE_URL)")
+    p.add_argument("--api-key", help="Primary API key (overrides $CORECODER_PRIMARY_API_KEY)")
     p.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive mode)")
     p.add_argument("-r", "--resume", metavar="ID", help="Resume a saved session")
-    p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
+    p.add_argument("-v", "--version", action="version", version=f"ZorinHelper {__version__}")
     return p.parse_args()
 
 
 def main():
     args = _parse_args()
     try:
-        config = Config.from_env()
+        config = Config.from_env({
+            "model": args.model,
+            "base_url": args.base_url,
+            "api_key": args.api_key,
+        })
     except ConfigError as exc:
-        console.print(f"[red]Invalid fallback configuration: {exc}[/red]")
+        console.print(f"[red]Invalid configuration: {exc}[/red]")
         sys.exit(2)
 
-    # CLI args override env vars
-    if args.model:
-        config.model = args.model
-    if args.base_url:
-        config.base_url = args.base_url
-    if args.api_key:
-        config.api_key = args.api_key
-
-    if not config.api_key:
-        console.print("[red bold]No API key found.[/]")
-        console.print(
-            "Set one of: OPENAI_API_KEY or CORECODER_API_KEY\n"
-            "\nExamples:\n"
-            "  # OpenAI\n"
-            "  export OPENAI_API_KEY=sk-...\n"
-            "\n"
-            "  # DeepSeek\n"
-            "  export OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com\n"
-            "\n"
-            "  # Ollama (local)\n"
-            "  export OPENAI_API_KEY=ollama OPENAI_BASE_URL=http://localhost:11434/v1 CORECODER_MODEL=qwen2.5-coder\n"
-        )
-        sys.exit(1)
-
-    llm_cls = LiteLLM if config.provider == "litellm" else LLM
-    llm = llm_cls(
-        model=config.model,
-        api_key=config.api_key,
-        base_url=config.base_url,
-        temperature=config.temperature,
-        max_tokens=config.max_tokens,
-    )
-    chain = ModelChain(primary=llm, fallbacks=config.fallbacks, budget=BudgetState(config.max_cost_usd))
+    chain = ModelChain.from_config(config)
     agent = Agent(llm=chain, max_context_tokens=config.max_context_tokens)
+    model_override: str | None = None
 
     # resume saved session
     if args.resume:
         loaded = load_session(args.resume)
         if loaded:
-            agent.messages, loaded_model = loaded
+            agent.messages, saved_override = loaded
             # restore the model from the saved session unless overridden by CLI
-            if not args.model:
-                agent.llm.model = loaded_model
-                config.model = loaded_model
+            if saved_override and not args.model:
+                agent.switch_model(saved_override)
+                model_override = saved_override
             console.print(f"[green]Resumed session: {args.resume} (model: {agent.llm.model})[/green]")
         else:
             console.print(f"[red]Session '{args.resume}' not found.[/red]")
@@ -98,7 +70,7 @@ def main():
         return
 
     # interactive REPL
-    _repl(agent, config)
+    _repl(agent, config, model_override)
 
 
 def _run_once(agent: Agent, prompt: str):
@@ -120,12 +92,11 @@ def _run_once(agent: Agent, prompt: str):
     print()
 
 
-def _repl(agent: Agent, config: Config):
+def _repl(agent: Agent, config: Config, model_override: str | None = None):
     """Interactive read-eval-print loop."""
     console.print(Panel(
-        f"[bold]CoreCoder[/bold] v{__version__}\n"
-        f"Model: [cyan]{config.model}[/cyan]"
-        + (f"  Base: [dim]{config.base_url}[/dim]" if config.base_url else "")
+        f"[bold]ZorinHelper[/bold] v{__version__}\n"
+        f"{_startup_model_summary(config)}"
         + "\nType [bold]/help[/bold] for commands, [bold]Ctrl+C[/bold] to cancel, [bold]quit[/bold] to exit.",
         border_style="blue",
     ))
@@ -199,7 +170,7 @@ def _repl(agent: Agent, config: Config):
             new_model = user_input[7:].strip() if user_input.startswith("/model ") else ""
             if new_model:
                 agent.switch_model(new_model)
-                config.model = new_model
+                model_override = new_model
                 console.print(f"Switched to [cyan]{new_model}[/cyan]")
             else:
                 console.print(f"Current model: [cyan]{agent.llm.model}[/cyan]")
@@ -215,7 +186,7 @@ def _repl(agent: Agent, config: Config):
                 console.print(f"[dim]Nothing to compress ({before} tokens, {len(agent.messages)} messages)[/dim]")
             continue
         if user_input == "/save":
-            sid = save_session(agent.messages, config.model)
+            sid = save_session(agent.messages, model_override)
             console.print(f"[green]Session saved: {sid}[/green]")
             console.print(f"Resume with: corecoder -r {sid}")
             continue
@@ -282,14 +253,27 @@ def _show_help():
         "  /diff          Show files modified this session\n"
         "  /save          Save session to disk\n"
         "  /sessions      List saved sessions\n"
-        "  quit           Exit CoreCoder\n"
+        "  quit           Exit ZorinHelper\n"
         "\n"
         "[bold]Input:[/bold]\n"
         "  Enter          Submit message\n"
         "  Esc+Enter      Insert newline (for pasting code)",
-        title="CoreCoder Help",
+        title="ZorinHelper Help",
         border_style="dim",
     ))
+
+
+def _startup_model_summary(config: Config) -> str:
+    """Format only the configured model names and base URLs for the startup panel."""
+    lines = [_startup_model_line("Model", config.primary.model, config.primary.base_url)]
+    for index, fallback in enumerate(config.fallbacks, start=1):
+        lines.append(_startup_model_line(f"Fallback {index}", fallback.model, fallback.base_url))
+    return "\n".join(lines)
+
+
+def _startup_model_line(label: str, model: str, base_url: str | None) -> str:
+    base = f"  Base: [dim]{base_url}[/dim]" if base_url else ""
+    return f"{label}: [cyan]{model}[/cyan]{base}"
 
 
 def _brief(kwargs: dict, maxlen: int = 80) -> str:

@@ -63,32 +63,30 @@ pip install -e .
 
 只想先跑起来找找感觉，直接 `pip install corecoder` 也行。
 
-给它一个模型加一把 key 就能动。默认走 OpenAI 兼容接口，换 provider 通常只是改两个环境变量：
+将 `.env.example` 复制为 `.env`，填写必填的主模型和密钥后即可运行。主模型与每一级备用模型都使用同一组完整字段：
 
-| Provider | 环境变量示例 |
-|---|---|
-| OpenAI（默认 `gpt-5.5`） | `OPENAI_API_KEY=sk-...` |
-| DeepSeek | `OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com CORECODER_MODEL=deepseek-chat` |
-| 本地 Ollama | `OPENAI_API_KEY=ollama OPENAI_BASE_URL=http://localhost:11434/v1 CORECODER_MODEL=qwen2.5-coder` |
+| 字段 | 用途 | 默认值 |
+|---|---|---|
+| `MODEL`、`API_KEY` | 模型标识和该级别显式密钥 | 必填 |
+| `BACKEND` | `openai_compatible` 或 `litellm` 客户端 | `openai_compatible` |
+| `PROVIDER` | 用于诊断的自由供应商标识 | `openai` |
+| `BASE_URL` | 该级别的服务地址 | 供应商默认值 |
+| `TEMPERATURE`、`MAX_TOKENS` | 该级别的生成参数 | `0`、`4096` |
 
-Kimi、Qwen 这些同样是改这两个变量；连 OpenAI 兼容接口都不给的 provider，装上可选的 LiteLLM 后端（`pip install "corecoder[litellm]"`）能路由一百多家。第三篇文章把这块讲得更细。key 可以直接 `export`，也可以在项目根目录扔个 `.env`，启动时自动加载。然后：
+主模型使用 `CORECODER_PRIMARY_<FIELD>`，按序备用模型使用 `CORECODER_FALLBACK_<N>_<FIELD>`。唯一的优先级为：CLI 主模型参数、系统环境变量、当前目录 `.env`、默认值。旧的 `CORECODER_MODEL`、`OPENAI_API_KEY` 等名称会直接报出迁移提示。非 OpenAI 兼容接口可安装 `corecoder[litellm]`。
 
 ```bash
 corecoder                                  # 交互式 REPL
 corecoder -p "给 parse_config() 加错误处理"   # 一次性模式，干完就退
 ```
 
-## 降级链与硬预算
+## 降级链、状态与硬预算
 
-将 `.env.example` 复制为 `.env`，并用连续编号的
-`CORECODER_FALLBACK_<N>_*` 环境变量配置备用模型。每一级的 `API_KEY` 直接填写
-密钥。应保持 `.env` 不被 Git 跟踪，且绝不提交其中的密钥。模型重试耗尽后，CoreCoder 会
-依次尝试备用模型；首次成功降级后会持续使用该模型，直到通过
-`/model <名称>` 显式切换主模型。
+备用索引必须从 1 开始连续编号。启用的备用级别必须填写表中要求的字段；示例文件将备用块默认注释，因此复制模板不会意外启用不完整的备用模型。每一级都拥有自己的 API Key。应保持 `.env` 不被 Git 跟踪，且绝不提交其中的密钥。
 
-设置 `CORECODER_MAX_COST_USD` 可限制单个进程的估算总花费。超过上限时，新的
-LLM 请求会被拒绝，已在执行的工作不会被中断。`/budget <金额>` 可不重启进程
-直接调高上限，`/tokens` 会显示累计 token 用量与估算成本。
+ZorinHelper 启动信息框仅展示主模型和各备用模型的名称与 Base URL；不会展示密钥、provider、backend、预算或其他配置。`ModelChain.status()` 会显示当前生效级别和最近失败类型，但不会显示密钥或 URL 查询参数。模型重试耗尽后，ZorinHelper 会依次尝试备用模型；首次成功降级后会持续使用该模型。`/model <名称>` 只改变运行时主模型名并重置熔断，不修改连接参数或备用链。
+
+`CORECODER_MAX_CONTEXT_TOKENS` 设置上下文上限，`CORECODER_MAX_COST_USD` 可限制单个进程的估算总花费。超过上限时，新的 LLM 请求会被拒绝，已在执行的工作不会被中断。`/budget <金额>` 可不重启进程直接调高上限，`/tokens` 会显示累计 token 用量与估算成本。
 
 ## 读懂它：代码地图
 

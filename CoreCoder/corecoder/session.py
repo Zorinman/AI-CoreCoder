@@ -1,7 +1,7 @@
 """Session persistence - save and resume conversations.
 
 Claude Code maintains session state via QueryEngine (1295 lines).
-CoreCoder distills this to: JSON dump of messages + model config.
+CoreCoder distills this to: JSON dump of messages + an explicit model override.
 """
 
 import json
@@ -38,15 +38,15 @@ def _session_path(session_id: str) -> Path:
     return path
 
 
-def save_session(messages: list[dict], model: str, session_id: str | None = None) -> str:
-    """Save conversation to disk. Returns the session ID."""
+def save_session(messages: list[dict], model_override: str | None, session_id: str | None = None) -> str:
+    """Save messages and an explicit runtime model-name override to disk."""
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
     session_id = _normalize_session_id(session_id)
 
     data = {
         "id": session_id,
-        "model": model,
+        "model_override": model_override,
         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "messages": messages,
     }
@@ -56,15 +56,15 @@ def save_session(messages: list[dict], model: str, session_id: str | None = None
     return session_id
 
 
-def load_session(session_id: str) -> tuple[list[dict], str] | None:
-    """Load a saved session. Returns (messages, model) or None."""
+def load_session(session_id: str) -> tuple[list[dict], str | None] | None:
+    """Load a saved session. Returns (messages, model_override) or None."""
     path = _session_path(session_id)
     if not path.exists():
         return None
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data["messages"], data["model"]
+        return data["messages"], data.get("model_override")
     except (json.JSONDecodeError, KeyError, OSError):
         # a corrupt or truncated session file shouldn't crash resume
         return None
@@ -87,7 +87,7 @@ def list_sessions() -> list[dict]:
                     break
             sessions.append({
                 "id": data.get("id", f.stem),
-                "model": data.get("model", "?"),
+                "model": data.get("model_override") or "configured default",
                 "saved_at": data.get("saved_at", "?"),
                 "preview": preview,
             })

@@ -7,10 +7,13 @@ module only decides which model should receive the next request.
 
 from __future__ import annotations
 
-import math
-from typing import Any, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Sequence
 
+from .budget import BudgetState
 from .config import ModelConfig
+
+if TYPE_CHECKING:
+    from .config import Config
 
 
 class FallbackError(RuntimeError):
@@ -23,22 +26,6 @@ class FallbackExhaustedError(FallbackError):
 
 class BudgetExceededError(FallbackError):
     """Raised before a new LLM request when the hard budget is exhausted."""
-
-
-class BudgetState:
-    """Mutable process-wide hard budget state shared by agents and children."""
-
-    def __init__(self, limit_usd: float | None = None):
-        self.limit_usd = limit_usd
-
-    def set_limit(self, value: float, *, only_increase: bool = False) -> float:
-        value = float(value)
-        if not math.isfinite(value) or value < 0:
-            raise ValueError("Budget limit must be a finite non-negative number.")
-        if only_increase and self.limit_usd is not None and value < self.limit_usd:
-            raise ValueError("New budget limit must be greater than or equal to the current limit.")
-        self.limit_usd = value
-        return value
 
 
 class ModelChain:
@@ -66,9 +53,28 @@ class ModelChain:
         if raw_fallbacks is None:
             raw_fallbacks = []
 
-        self._models = [primary] + [self._make_model(item) for item in raw_fallbacks]
+        items = [primary, *raw_fallbacks]
+        self._configs = [item if isinstance(item, ModelConfig) else None for item in items]
+        self._models = [self._make_model(item) for item in items]
         self._active_index = 0
         self.budget = budget if budget is not None else BudgetState()
+        self._last_failure: str | None = None
+
+    @classmethod
+    def from_config(
+        cls,
+        config: "Config",
+        *,
+        budget: BudgetState | None = None,
+        llm_factory: Callable[[ModelConfig], Any] | None = None,
+    ) -> "ModelChain":
+        """Create every production model through one resolved configuration path."""
+        return cls(
+            primary=config.primary,
+            fallbacks=config.fallbacks,
+            budget=budget if budget is not None else BudgetState(config.max_cost_usd),
+            llm_factory=llm_factory,
+        )
 
     def _make_model(self, item: Any) -> Any:
         if not isinstance(item, ModelConfig):
@@ -78,8 +84,14 @@ class ModelChain:
             return self._factory(cfg)
         from .llm import LLM, LiteLLM
 
-        cls = LiteLLM if cfg.provider.lower() == "litellm" else LLM
-        return cls(model=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url)
+        cls = LiteLLM if cfg.backend == "litellm" else LLM
+        return cls(
+            model=cfg.model,
+            api_key=cfg.api_key,
+            base_url=cfg.base_url,
+            temperature=cfg.temperature,
+            max_tokens=cfg.max_tokens,
+        )
 
     @property
     def models(self) -> list[Any]:
@@ -100,6 +112,22 @@ class ModelChain:
     @property
     def circuit_open(self) -> bool:
         return self._active_index > 0
+
+    def status(self) -> str:
+        """Return a display-safe summary of the configured chain and runtime state."""
+        lines: list[str] = []
+        for index, (model, config) in enumerate(zip(self._models, self._configs)):
+            label = "Primary" if index == 0 else f"Fallback {index}"
+            if config is not None:
+                detail = config.summary()
+            else:
+                detail = f"model={getattr(model, 'model', '')}"
+            lines.append(f"{label}: {detail}")
+        active = "primary" if self._active_index == 0 else f"fallback {self._active_index}"
+        lines.append(f"Active: {active}")
+        if self._last_failure:
+            lines.append(f"Last failure: {self._last_failure}")
+        return "\n".join(lines)
 
     @property
     def model(self) -> str:
@@ -142,12 +170,7 @@ class ModelChain:
         return sum(known) if known else None
 
     def _current_model_cost_known(self) -> bool:
-        return self.model in self._pricing
-
-    @property
-    def _pricing(self):
-        from .llm import _PRICING
-        return _PRICING
+        return bool(getattr(self.current, "has_known_cost", False))
 
     def can_start_request(self) -> bool:
         """Return False only when a known-cost current model exceeds the cap."""
@@ -176,6 +199,7 @@ class ModelChain:
                 self._active_index = index
                 return result
             except Exception as exc:
+                self._last_failure = f"level {index}: {type(exc).__name__}"
                 errors.append(exc)
         detail = "; ".join(f"{type(e).__name__}: {e}" for e in errors)
         raise FallbackExhaustedError(

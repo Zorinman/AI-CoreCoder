@@ -63,34 +63,30 @@ pip install -e .
 
 If you just want to get it running first, `pip install corecoder` works too.
 
-Give it a model and a key and it goes. It speaks the OpenAI-compatible API by default, and switching providers is usually just two environment variables:
+Copy `.env.example` to `.env`, fill in the required primary model and key, and run it. Every primary and fallback level has the same complete configuration:
 
-| Provider | Example env vars |
-|---|---|
-| OpenAI (default `gpt-5.5`) | `OPENAI_API_KEY=sk-...` |
-| DeepSeek | `OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com CORECODER_MODEL=deepseek-chat` |
-| Local Ollama | `OPENAI_API_KEY=ollama OPENAI_BASE_URL=http://localhost:11434/v1 CORECODER_MODEL=qwen2.5-coder` |
+| Field | Purpose | Default |
+|---|---|---|
+| `MODEL`, `API_KEY` | Model identifier and that level's explicit credential | required |
+| `BACKEND` | `openai_compatible` or `litellm` client | `openai_compatible` |
+| `PROVIDER` | Free supplier label for diagnostics | `openai` |
+| `BASE_URL` | Endpoint for that level | provider default |
+| `TEMPERATURE`, `MAX_TOKENS` | Generation settings for that level | `0`, `4096` |
 
-Kimi, Qwen and the like are the same two variables; for providers that don't even offer an OpenAI-compatible endpoint, the optional LiteLLM backend (`pip install "corecoder[litellm]"`) routes to a hundred-plus of them. The third essay goes into this in detail. The key can be `export`ed directly or dropped into a `.env` at the project root, which is loaded on startup. Then:
+Use `CORECODER_PRIMARY_<FIELD>` for the primary model and `CORECODER_FALLBACK_<N>_<FIELD>` for ordered fallbacks. The only supported configuration precedence is CLI primary overrides, process environment, the `.env` in the current directory, then defaults. Legacy `CORECODER_MODEL`, `OPENAI_API_KEY`, and related names deliberately fail with a migration hint. Install `corecoder[litellm]` for non-OpenAI-compatible backends.
 
 ```bash
 corecoder                                             # interactive REPL
 corecoder -p "add error handling to parse_config()"   # one-shot mode, exits when done
 ```
 
-## Fallbacks and hard budget
+## Fallbacks, status and hard budget
 
-Copy `.env.example` to `.env` and configure ordered fallbacks with consecutive
-`CORECODER_FALLBACK_<N>_*` variables. Each level's `API_KEY` holds its secret
-directly. Keep `.env` untracked and never commit its keys. After a model
-exhausts its retries, CoreCoder advances
-through that list and keeps using the first successful fallback until
-`/model <name>` explicitly selects a new primary model.
+Fallback indexes must be consecutive and start at 1. All fields of an enabled fallback are required where the field table says required; the example keeps fallback blocks commented so copying it cannot enable a partial fallback. Each level owns its API key. Keep `.env` untracked and never commit its keys.
 
-Set `CORECODER_MAX_COST_USD` to cap the process-wide estimated spend. Once the
-current estimated cost is above that limit, new LLM requests are refused while
-in-flight work is left alone. `/budget <usd>` can raise the limit without
-restarting; `/tokens` reports aggregate token usage and the estimated cost.
+The ZorinHelper startup panel prints only each primary/fallback model name and Base URL; it never prints credentials, provider, backend, budgets, or other configuration. `ModelChain.status()` reports the active level and recent failure type without printing credentials or URL query values. After a model exhausts its retries, ZorinHelper advances through the chain and stays on the first successful fallback. `/model <name>` changes only the running primary model name and resets that circuit breaker; it does not alter connection settings or the fallback chain.
+
+`CORECODER_MAX_CONTEXT_TOKENS` sets the context limit and `CORECODER_MAX_COST_USD` caps process-wide estimated spend. Once the current estimated cost is above that limit, new LLM requests are refused while in-flight work is left alone. `/budget <usd>` can raise the limit without restarting; `/tokens` reports aggregate token usage and the estimated cost.
 
 ## Read it: the code map
 

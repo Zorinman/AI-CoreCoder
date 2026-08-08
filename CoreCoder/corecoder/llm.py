@@ -121,6 +121,11 @@ class LLM:
         return self.total_prompt_tokens * input_rate / 1_000_000 + self.total_completion_tokens * output_rate / 1_000_000
 
     @property
+    def has_known_cost(self) -> bool:
+        """Whether the current model has pricing data for budget admission checks."""
+        return self.model in _PRICING
+
+    @property
     def usage_by_model(self) -> dict[str, dict[str, int]]:
         usage = getattr(self, "_usage_by_model", None)
         if usage is None:
@@ -260,7 +265,8 @@ class LiteLLM(LLM):
     a single interface to switch between any provider by changing
     the model string.
 
-    Set CORECODER_PROVIDER=litellm and use LiteLLM model strings
+    Set CORECODER_PRIMARY_BACKEND=litellm (or the matching fallback backend)
+    and use LiteLLM model strings
     like ``anthropic/claude-3-haiku``, ``bedrock/anthropic.claude-v2``,
     ``vertex_ai/gemini-pro``, etc.
     """

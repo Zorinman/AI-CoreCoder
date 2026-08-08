@@ -5,9 +5,9 @@ import os
 import pytest
 
 from corecoder.agent import Agent
+from corecoder.budget import BudgetState
 from corecoder.config import Config, ConfigError, ModelConfig
 from corecoder.fallback import (
-    BudgetState,
     FallbackExhaustedError,
     ModelChain,
 )
@@ -29,6 +29,10 @@ class _FakeLLM:
     def estimated_cost(self):
         return self.cost
 
+    @property
+    def has_known_cost(self):
+        return self.cost is not None
+
     def chat(self, **kwargs):
         self.calls += 1
         self.requests.append(kwargs.get("messages", []))
@@ -39,7 +43,7 @@ class _FakeLLM:
 
 def _clear_fallback_environment(monkeypatch):
     for name in list(os.environ):
-        if name.startswith("CORECODER_FALLBACK_"):
+        if name.startswith("CORECODER_") or name in {"OPENAI_API_KEY", "OPENAI_BASE_URL"}:
             monkeypatch.delenv(name)
 
 
@@ -53,6 +57,8 @@ def test_chain_advances_after_each_level_exhausts_its_retries():
     assert [primary.calls, first_fallback.calls, second_fallback.calls] == [3, 3, 1]
     assert chain.active_index == 2
     assert chain.circuit_open is True
+    assert "Active: fallback 2" in chain.status()
+    assert "Last failure: level 1: RuntimeError" in chain.status()
 
     # The circuit breaker keeps using the successful fallback.
     assert chain.chat(messages=[]).content == "second"
@@ -99,11 +105,14 @@ def test_explicit_model_switch_resets_circuit_without_changing_fallbacks():
 def test_config_loads_ordered_fallbacks_from_environment(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _clear_fallback_environment(monkeypatch)
+    monkeypatch.setenv("CORECODER_PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("CORECODER_PRIMARY_API_KEY", "primary-key")
     monkeypatch.setenv("CORECODER_FALLBACK_1_MODEL", "deepseek-v4-flash")
-    monkeypatch.setenv("CORECODER_FALLBACK_1_PROVIDER", "openai")
+    monkeypatch.setenv("CORECODER_FALLBACK_1_PROVIDER", "deepseek")
     monkeypatch.setenv("CORECODER_FALLBACK_1_API_KEY", "key-one")
     monkeypatch.setenv("CORECODER_FALLBACK_2_MODEL", "anthropic/claude-haiku-4-5")
-    monkeypatch.setenv("CORECODER_FALLBACK_2_PROVIDER", "litellm")
+    monkeypatch.setenv("CORECODER_FALLBACK_2_BACKEND", "litellm")
+    monkeypatch.setenv("CORECODER_FALLBACK_2_PROVIDER", "anthropic")
     monkeypatch.setenv("CORECODER_FALLBACK_2_API_KEY", "key-two")
 
     config = Config.from_env()
@@ -118,6 +127,8 @@ def test_config_loads_ordered_fallbacks_from_environment(tmp_path, monkeypatch):
 def test_config_rejects_missing_fallback_key(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _clear_fallback_environment(monkeypatch)
+    monkeypatch.setenv("CORECODER_PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("CORECODER_PRIMARY_API_KEY", "primary-key")
     monkeypatch.setenv("CORECODER_FALLBACK_1_MODEL", "gpt-4o-mini")
     monkeypatch.setenv("CORECODER_FALLBACK_1_API_KEY", "")
 
@@ -125,19 +136,20 @@ def test_config_rejects_missing_fallback_key(tmp_path, monkeypatch):
         Config.from_env()
 
 
-def test_config_does_not_use_deepseek_api_key_as_primary_credential(tmp_path, monkeypatch):
+def test_config_rejects_obsolete_primary_environment_variable(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _clear_fallback_environment(monkeypatch)
-    for name in ("CORECODER_API_KEY", "OPENAI_API_KEY"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "legacy-key")
+    monkeypatch.setenv("CORECODER_MODEL", "legacy-model")
 
-    assert Config.from_env().api_key == ""
+    with pytest.raises(ConfigError, match="CORECODER_PRIMARY_MODEL"):
+        Config.from_env()
 
 
 def test_config_loads_budget_from_environment(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _clear_fallback_environment(monkeypatch)
+    monkeypatch.setenv("CORECODER_PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("CORECODER_PRIMARY_API_KEY", "primary-key")
     monkeypatch.setenv("CORECODER_MAX_COST_USD", "1.25")
 
     assert Config.from_env().max_cost_usd == 1.25
@@ -146,6 +158,8 @@ def test_config_loads_budget_from_environment(tmp_path, monkeypatch):
 def test_config_rejects_skipped_fallback_index(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _clear_fallback_environment(monkeypatch)
+    monkeypatch.setenv("CORECODER_PRIMARY_MODEL", "primary")
+    monkeypatch.setenv("CORECODER_PRIMARY_API_KEY", "primary-key")
     monkeypatch.setenv("CORECODER_FALLBACK_2_MODEL", "gpt-4o-mini")
 
     with pytest.raises(ConfigError, match="consecutive"):
@@ -154,7 +168,7 @@ def test_config_rejects_skipped_fallback_index(tmp_path, monkeypatch):
 
 def test_chain_builds_fallbacks_from_resolved_config():
     primary = _FakeLLM("primary")
-    fallback_config = ModelConfig(model="fallback", api_key="key", provider="openai")
+    fallback_config = ModelConfig(model="fallback", api_key="key", provider="test")
     chain = ModelChain(primary, [fallback_config], llm_factory=lambda config: _FakeLLM(config.model))
 
     assert [model.model for model in chain.models] == ["primary", "fallback"]
