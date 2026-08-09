@@ -1,7 +1,8 @@
 # New Features
 
 记录在 `article/` 原教程之外，为本项目新增的扩展功能。每个功能对应
-`docs/specs/` 下的一份 spec 和 `docs/adr/` 下的一份 ADR。
+`docs/workflow/` 下的 spec 和 ADR；已归档功能的文档位于
+`docs/workflow/archives/`。
 
 ## 1. 并发安全分段调度（concurrency-safe segmented scheduling）
 

@@ -154,7 +154,7 @@ self._record_usage(response.prompt_tokens, response.completion_tokens)
 return response
 ```
 
-这一个解码器统一处理文本回调、按调用 index 拼接工具调用、无效 JSON 回退为空参数，以及最终 chunk 的 token 用量。这样 OpenAI 兼容后端与 LiteLLM 后端只在请求参数和重试策略上不同，流式响应的语义保持一致；修一次解析边角，两边同时生效。
+这一个解码器统一处理文本回调、按调用 index 拼接工具调用、无效 JSON 回退为空参数，以及最终 chunk 的 token 用量。它还容忍空 `choices`、缺失的 `delta` 或 `function` 字段，不让某个 provider 的可选字段缺失拖垮整次响应。这样 OpenAI 兼容后端与 LiteLLM 后端只在请求参数和重试策略上不同，流式响应的语义保持一致；修一次解析边角，两边同时生效。
 
 ## 把钱算出来
 
@@ -193,6 +193,8 @@ Tokens: 12043 prompt + 3201 completion = 15244 total  (~$0.0621)
 
 当然，这只是估算。价目表会随时间变化，缓存折扣和批量定价等因素也未纳入计算。不过，对于判断一次操作的大致成本，它已经足够。能够及时看到成本的 agent，与只能在账单到来后再追溯成本的 agent，使用体验截然不同。
 
+预算准入不直接读取 `_PRICING` 这张私有表，而是通过 LLM 公开的 `has_known_cost` 能力判断当前模型是否有可用定价数据。已知价格的模型会在发起新请求前检查硬预算；未知价格的模型按放行策略处理，同时仍会累计实际拿到的 token 用量。
+
 ## 配置从哪来
 
 最后串一下 `config.py`。它不再把一堆扁平变量拼成一个模型，而是把主模型和每一级备用模型都解析成同一种不可变 `ModelConfig`：
@@ -210,9 +212,12 @@ CORECODER_PRIMARY_MAX_TOKENS=4096
 CORECODER_FALLBACK_1_MODEL=anthropic/claude-haiku-4-5
 CORECODER_FALLBACK_1_API_KEY=sk-...
 CORECODER_FALLBACK_1_BACKEND=litellm
+CORECODER_FALLBACK_1_PROVIDER=anthropic
+CORECODER_FALLBACK_1_TEMPERATURE=0
+CORECODER_FALLBACK_1_MAX_TOKENS=4096
 ```
 
-备用编号必须从 1 连续递增；`MODEL` 与 `API_KEY` 必填，`BACKEND` 只能是 `openai_compatible` 或 `litellm`。CLI 的 `--model`、`--api-key`、`--base-url` 只覆盖主模型对应字段；其后才是进程环境变量、当前目录 `.env` 和默认生成参数。旧的 `OPENAI_*`、`CORECODER_MODEL` 等变量会明确报错并给出迁移目标，不再悄悄兼容。`Config` 解析完成后，`ModelChain.from_config()` 用同一条路径构造主备模型，因而温度、最大输出等参数不会在降级时丢失。
+备用编号必须从 1 连续递增；每一级的 `MODEL` 与 `API_KEY` 必填，其他字段也属于该级自己的配置，`BASE_URL` 可以省略。`BACKEND` 只能是 `openai_compatible` 或 `litellm`，`PROVIDER` 只是非空的供应商标识。CLI 的 `--model`、`--api-key`、`--base-url` 只覆盖主模型对应字段；其后才是进程环境变量、当前目录 `.env` 和默认生成参数。旧的 `OPENAI_*`、`CORECODER_MODEL` 等变量会明确报错并给出迁移目标，不再悄悄兼容。`ModelConfig` 和外层 `Config` 都是不可变快照：前者描述单个模型，后者保存主模型、备用链、上下文上限和预算上限。`ModelChain.from_config()` 用同一条路径构造主备模型，因而温度、最大输出等参数不会在降级时丢失；运行时的当前级别、熔断、预算和模型名覆盖由模型链与 `BudgetState` 保存，不回写启动配置。`.env.example` 列出全部正式字段，备用模型块默认注释，复制模板后不会意外启用不完整的备用级别。
 
 ## 这一篇带走什么
 

@@ -55,6 +55,8 @@ def _create_default_tools(self) -> list[Tool]:
 
 这里的 `state` 保存当前工作目录和已修改文件。`bash`、`write_file`、`edit_file` 共用同一个 agent 私有状态；两个不同的 agent 不会互相覆盖工作目录、改动记录或 `AgentTool` 的父引用。想扩展 CLI 的默认能力，就往这个工厂方法里加一个新实例。这件事我们留到本篇最后真做一次。
 
+这也意味着旧的进程级 `ALL_TOOLS` 和 `get_tool` 入口已经删除，不提供兼容层。工具的所有权只从 `Agent` 实例或调用者显式传入的列表中确定，不能再通过全局注册表取得一个共享实例。
+
 ## edit_file：一个看着平平无奇的关键创新
 
 七个工具中，最值得展开的是 `edit_file`。让模型修改已有文件看似简单，实际已经淘汰过多种不可靠的方案。
@@ -115,7 +117,7 @@ except UnicodeDecodeError:
 
 `read_file`、`edit_file` 这些工具能造成的破坏有限。`bash` 不一样，它能跑任意 shell 命令，模型一旦写出 `rm -rf /`，后果是真实的。
 
-Claude Code 的 `BashTool` 公开拆解里是 1143 行，里头有命令分类器、有基于 `sandbox-exec` 和 `seccomp` 的真沙箱、有输出截断、有交互式命令拦截。CoreCoder 的 `bash.py` 是 127 行的蒸馏版，保留了四件最要紧的事：危险命令检测、输出截断、超时、工作目录跟踪。
+Claude Code 的 `BashTool` 公开拆解里是 1143 行，里头有命令分类器、有基于 `sandbox-exec` 和 `seccomp` 的真沙箱、有输出截断、有交互式命令拦截。CoreCoder 的 `bash.py` 是一个更小的蒸馏版，保留了四件最要紧的事：危险命令检测、输出截断、超时、工作目录跟踪。
 
 危险命令检测是一张正则黑名单：
 
