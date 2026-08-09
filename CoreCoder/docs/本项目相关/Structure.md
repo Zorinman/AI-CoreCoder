@@ -20,9 +20,9 @@ Agent.chat() -> ModelChain.chat() -> 当前 LLM.chat() -> LLMResponse
 | 分类             | 结构                                                                                                     |
 | ---------------- | -------------------------------------------------------------------------------------------------------- |
 | 配置与模型通信   | `Config`、`ModelConfig`、`BudgetState`、`ModelChain`、`ToolCall`、`LLMResponse`、`LLM`、`LiteLLM`         |
-| Agent 运行状态   | `Agent`、`ContextManager`、消息字典、会话 JSON                                                           |
+| Agent 运行状态   | `Agent`、`ContextManager`、Agent 运行状态、消息字典、会话 JSON                                            |
 | 工具体系         | `Tool`、`BashTool`、`ReadFileTool`、`WriteFileTool`、`EditFileTool`、`GlobTool`、`GrepTool`、`AgentTool` |
-| 共享注册表与状态 | `ALL_TOOLS`、`_tool_by_name`、`_changed_files`、`_local`、`_PRICING` 等                                  |
+| 模块辅助状态     | `_tool_by_name`、`_PRICING`、危险命令规则、搜索跳过目录和会话目录等                                      |
 
 ## 一、配置与模型通信
 
@@ -102,7 +102,9 @@ class ToolCall:
 | 属性            | 作用                                                    |
 | --------------- | ------------------------------------------------------- |
 | `llm`           | 一个 `LLM` 或 `LiteLLM` 对象                            |
-| `tools`         | 可用的 `Tool` 对象列表，默认使用 `ALL_TOOLS`            |
+| `tools`         | 可用的 `Tool` 对象列表；未显式传入时由该 Agent 创建默认实例 |
+| `_runtime_state` | 当前工作目录和已变更文件，仅由该 Agent 的状态型 Tool 共享 |
+| `changed_files` | 已变更文件的只读快照，供 CLI 展示                         |
 | `_tool_by_name` | `dict[str, Tool]`，将工具名映射到工具对象，便于快速查找 |
 | `messages`      | `list[dict]`，当前对话历史，不含系统提示词              |
 | `context`       | `ContextManager`，负责压缩历史                          |
@@ -191,16 +193,15 @@ class ToolCall:
 
 `AgentTool` 比其他工具多一个 `_parent_agent` 引用。主 `Agent` 初始化时会注入自己；子 Agent 会复用父模型，但移除 `agent` 工具以禁止递归派生。`AgentTool` 保持 `concurrency_safe` 默认值——子 agent 内部可能触发写操作或消耗共享的降级/预算状态，不适合被当作并发安全工具处理。
 
-## 四、共享注册表与辅助状态
+## 四、Agent 私有状态与模块辅助状态
 
-这些结构不是类，但承载了多个对象共享的状态或规则。
+默认 Tool 与可变运行状态不在 Agent 之间共享。模块级数据只保存不依附于某个 Agent 生命周期的规则或常量。
 
 | 结构                  | 类型               | 定义位置            | 作用                                                      |
 | --------------------- | ------------------ | ------------------- | --------------------------------------------------------- |
-| `ALL_TOOLS`           | `list[Tool]`       | `tools/__init__.py` | 默认工具实例注册表，`Agent` 未传入工具时使用它            |
-| `_tool_by_name`       | `dict[str, Tool]`  | `Agent` 实例        | 由 `ALL_TOOLS` 或传入工具列表构建，按名称定位工具         |
-| `_changed_files`      | `set[str]`         | `tools/edit.py`     | 本次进程内被写入或编辑过的文件路径，供 `/diff` 显示       |
-| `_local`              | `threading.local`  | `tools/bash.py`     | 每个线程独立保存 Shell 当前目录，避免并行命令互相覆盖目录 |
+| `ToolRuntimeState`    | 数据类             | Agent 私有状态      | 保存该 Agent 的工作目录和已变更文件                      |
+| `_tool_by_name`       | `dict[str, Tool]`  | `Agent` 实例        | 由该 Agent 的 Tool 列表构建，按名称定位工具               |
+| `changed_files`       | `frozenset[str]`   | `Agent` 实例        | 返回当前 Agent 已变更文件的只读快照                       |
 | `_PRICING`            | `dict[str, tuple]` | `llm.py`            | 模型名到“每百万输入/输出 Token 单价”的映射，用于成本估算  |
 | `_DANGEROUS_PATTERNS` | `list[tuple]`      | `tools/bash.py`     | 正则表达式与风险说明的列表，用于拒绝部分高危 Shell 命令   |
 | `_SKIP_DIRS`          | `set[str]`         | `tools/grep.py`     | `grep` 递归搜索时忽略的目录名集合                         |
@@ -216,7 +217,7 @@ class ToolCall:
 1. `Config` 决定主模型、备用级别和硬预算上限；CLI 通过 `ModelChain.from_config()` 创建主备客户端、`BudgetState` 与 `ModelChain`。
 2. `Agent` 持有 `ModelChain`、`ContextManager`、工具列表和消息列表；子 Agent 复用同一条 `ModelChain`，因而共享熔断与预算状态。
 3. `ModelChain` 在每个模型自身重试耗尽后按顺序路由到下一级，并在成功降级后保持该当前级别；`/model` 会重置熔断状态。
-4. 当前 `LLM` 将供应商流式响应解析为 `LLMResponse`；其中的 `ToolCall` 指向某个 `Tool`。
+4. `LLM` 的统一解码器将供应商流式响应解析为 `LLMResponse`；其中的 `ToolCall` 指向某个 `Tool`。
 5. `Agent` 通过 `_tool_by_name` 找到工具，执行后把工具结果字典写回 `messages`。
 6. 多个 `tool_calls` 会先按 `Tool.concurrency_safe` 分段，再分别用线程池并发或直接串行执行，结果仍按原始调用顺序写回 `messages`。
 7. `ContextManager` 在需要时压缩同一个 `messages` 列表；会话功能将该列表持久化为 JSON。
@@ -362,7 +363,8 @@ class Agent:
     ):
         self.llm = model_chain if model_chain is not None else llm
         self.model_chain = self.llm if isinstance(self.llm, ModelChain) else model_chain
-        self.tools = tools if tools is not None else ALL_TOOLS
+        self._runtime_state = ToolRuntimeState()
+        self.tools = tools if tools is not None else self._create_default_tools()
         self._tool_by_name = {t.name: t for t in self.tools}
         self.messages: list[dict] = []
         self.context = ContextManager(max_tokens=max_context_tokens)
@@ -518,21 +520,21 @@ class AgentTool(Tool):
 
 ### 5. 无类数据结构的源码定义
 
-来源：[tools/__init__.py](../CoreCoder/corecoder/tools/__init__.py)、[tools/edit.py](../CoreCoder/corecoder/tools/edit.py)、[tools/bash.py](../CoreCoder/corecoder/tools/bash.py)、[tools/grep.py](../CoreCoder/corecoder/tools/grep.py)、[llm.py](../CoreCoder/corecoder/llm.py)。
+来源：[agent.py](../CoreCoder/corecoder/agent.py)、[tools/runtime.py](../CoreCoder/corecoder/tools/runtime.py)、[tools/grep.py](../CoreCoder/corecoder/tools/grep.py)、[llm.py](../CoreCoder/corecoder/llm.py)。
 
 ```python
-ALL_TOOLS = [
-    BashTool(),
-    ReadFileTool(),
-    WriteFileTool(),
-    EditFileTool(),
-    GlobTool(),
-    GrepTool(),
-    AgentTool(),
-]
+@dataclass
+class ToolRuntimeState:
+    cwd: str | None = None
+    changed_files: set[str] = field(default_factory=set)
 
-_changed_files: set[str] = set()
-_local = threading.local()
+
+def _create_default_tools(self) -> list[Tool]:
+    state = self._runtime_state
+    return [
+        BashTool(state), ReadFileTool(), WriteFileTool(state),
+        EditFileTool(state), GlobTool(), GrepTool(), AgentTool(),
+    ]
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", "dist", "build"}
 

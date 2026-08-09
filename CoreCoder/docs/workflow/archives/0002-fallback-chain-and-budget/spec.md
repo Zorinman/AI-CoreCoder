@@ -150,11 +150,11 @@ CoreCoder 目前只有单一主模型配置（`config.py`/环境变量）和针�
 
 # Further Notes
 
-本 feature 依赖 [0001-concurrency-scheduling](0001-concurrency-scheduling.md)
+本 feature 依赖 [0001-concurrency-scheduling](../0001-concurrency-scheduling/spec.md)
 中确立的"默认不安全/不并发"惯例：子 agent 工具本身在那份 spec 中已被列为
 永久不安全（不并发），这里进一步要求子 agent 与父 Agent 共享降级/预算状态，
 两者是一致的设计方向（子 agent 不应绕过父 Agent 的任何安全或成本约束）。
-第三份 spec（[0003-mcp-integration](0003-mcp-integration.md)）同样要求子
+第三份 spec（[0003-mcp-integration](../../specs/0003-mcp-integration.md)）同样要求子
 agent 默认共享父 Agent 的预算/熔断状态，但默认不继承 MCP 工具。对应决策记
-录见 `docs/adr/0002-fallback-chain-separate-config.md`，项目词汇见
+录见 `adr.md`，项目词汇见
 `CONTEXT.md` 中的"降级链""熔断""硬预算上限"条目。

@@ -42,7 +42,7 @@ MCP SDK 是异步（`async`）接口，而 CoreCoder 现有的工具执行接口
 
 子 agent 默认不会自动继承父 Agent 已连接的 MCP 工具；如果调用者希望某个子
 agent 也能使用某些 MCP 工具，需要在触发子 agent 时显式传入。但子 agent 仍
-然与父 Agent 共享同一份预算/熔断状态（[0002-fallback-chain-and-budget](0002-fallback-chain-and-budget.md)
+然与父 Agent 共享同一份预算/熔断状态（[0002-fallback-chain-and-budget](../archives/0002-fallback-chain-and-budget/spec.md)
 中确立的规则），只是不共享 MCP 工具集合本身。
 
 # User Stories
@@ -66,7 +66,7 @@ agent 也能使用某些 MCP 工具，需要在触发子 agent 时显式传入�
    传给它。
 7. 作为用户，当子 agent 确实消耗了预算（无论是否使用了 MCP 工具），我希望
    这部分花费仍然计入父 Agent 的总预算和当前生效的降级状态，与
-   [0002-fallback-chain-and-budget](0002-fallback-chain-and-budget.md) 中
+   [0002-fallback-chain-and-budget](../archives/0002-fallback-chain-and-budget/spec.md) 中
    的规则一致。
 8. 作为 CoreCoder 维护者，我希望 MCP 工具的 `inputSchema` 可以直接当作
    `Tool.parameters` 使用，不需要额外的字段转换或校验层。
@@ -98,11 +98,11 @@ agent 也能使用某些 MCP 工具，需要在触发子 agent 时显式传入�
   应的 `Tool.execute()` 实现内部把调用转发到该线程的事件循环上执行并阻塞等
   待结果返回，对调用者呈现为普通同步方法。这个转发机制封装在 MCP 工具类内
   部，不改变 `Tool` 基类接口，也不改变 Agent 现有的
-  `ThreadPoolExecutor`([0001-concurrency-scheduling](0001-concurrency-scheduling.md)
+  `ThreadPoolExecutor`([0001-concurrency-scheduling](../archives/0001-concurrency-scheduling/spec.md)
   中的分段调度)方案。
 - 子 agent 工具触发子 Agent 时，默认不会把父 Agent 已连接的 MCP 工具传入子
   Agent 的工具集合；如需传入，由调用方显式指定。子 agent 仍然共享父 Agent
-  的降级/熔断/预算累计状态（沿用 [0002-fallback-chain-and-budget](0002-fallback-chain-and-budget.md)
+  的降级/熔断/预算累计状态（沿用 [0002-fallback-chain-and-budget](../archives/0002-fallback-chain-and-budget/spec.md)
   的规则），这一点不因是否涉及 MCP 而改变。
 
 # Testing Decisions
@@ -139,10 +139,10 @@ agent 也能使用某些 MCP 工具，需要在触发子 agent 时显式传入�
 # Further Notes
 
 本 feature 是三份渐进 spec 中的最后一份，同时依赖前两份建立的规则：MCP 工
-具复用 [0001-concurrency-scheduling](0001-concurrency-scheduling.md) 确立
+具复用 [0001-concurrency-scheduling](../archives/0001-concurrency-scheduling/spec.md) 确立
 的"默认不并发"惯例（不因协议自报的 hint 而改变默认值），子 agent 与 MCP
 工具的关系（不自动继承）与子 agent 与预算状态的关系（默认共享，见
-[0002-fallback-chain-and-budget](0002-fallback-chain-and-budget.md)）是两
+[0002-fallback-chain-and-budget](../archives/0002-fallback-chain-and-budget/spec.md)）是两
 条独立但都需要遵守的规则,不要把两者混淆成"子 agent 完全隔离"或"子 agent 完
 全共享"的单一简单规则。对应决策记录见
 `docs/adr/0003-mcp-client-only-untrusted-hints.md`，项目词汇见

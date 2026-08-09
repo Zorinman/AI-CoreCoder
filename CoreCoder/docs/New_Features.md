@@ -5,8 +5,8 @@
 
 ## 1. 并发安全分段调度（concurrency-safe segmented scheduling）
 
-对应 spec：[docs/specs/0001-concurrency-scheduling.md](specs/0001-concurrency-scheduling.md)
-对应 ADR：[docs/adr/0001-concurrency-safety-whitelist.md](adr/0001-concurrency-safety-whitelist.md)
+对应归档 Spec：[docs/workflow/archives/0001-concurrency-scheduling/spec.md](workflow/archives/0001-concurrency-scheduling/spec.md)
+对应归档 ADR：[docs/workflow/archives/0001-concurrency-scheduling/adr.md](workflow/archives/0001-concurrency-scheduling/adr.md)
 
 **状态**：已归档（实现提交 `d8a25c4`，2026-08-08；归档日期 2026-08-09）
 
@@ -43,8 +43,8 @@
 
 ## 2. 统一主备模型配置（unified primary and fallback model configuration）
 
-对应归档 Spec：[docs/archives/0004-unified-model-configuration.md](archives/0004-unified-model-configuration.md)
-对应归档 ADR：[docs/archives/0004-immutable-symmetric-model-configuration.md](archives/0004-immutable-symmetric-model-configuration.md)
+对应归档 Spec：[docs/workflow/archives/0004-unified-model-configuration/spec.md](workflow/archives/0004-unified-model-configuration/spec.md)
+对应归档 ADR：[docs/workflow/archives/0004-unified-model-configuration/adr.md](workflow/archives/0004-unified-model-configuration/adr.md)
 
 **状态**：已归档
 
@@ -73,3 +73,28 @@
 ### 验证
 
 - 自动化测试覆盖环境变量与程序化构造等价、主备参数转发、严格校验、旧变量迁移错误、脱敏输出和运行时状态边界。
+
+## 3. Agent 私有 Tool 状态与统一流式解码
+
+对应归档 Spec：[docs/workflow/archives/0005-agent-private-tool-state-and-stream-decoding/spec.md](workflow/archives/0005-agent-private-tool-state-and-stream-decoding/spec.md)
+对应归档 ADR：[docs/workflow/archives/0005-agent-private-tool-state-and-stream-decoding/adr.md](workflow/archives/0005-agent-private-tool-state-and-stream-decoding/adr.md)
+
+**状态**：已归档（归档日期 2026-08-10）
+
+### 问题
+
+默认 Tool 曾在模块导入时创建为共享实例。多个 Agent 会共用可变 Tool，后创建的 Agent 会覆盖 `AgentTool` 的父 Agent 引用；Shell 当前目录和变更文件记录也无法与单个 Agent 的会话边界对齐。OpenAI 兼容后端和 LiteLLM 后端还各自维护了一份流式文本、工具调用和用量的解码逻辑。
+
+### 方案
+
+- `Agent` 为未显式传入工具列表的场景创建新的默认 Tool 实例，并持有独立的 Agent 运行状态。
+- 运行状态保存当前工作目录和已变更文件；`Agent.changed_files` 返回只读快照，CLI 的 `/diff` 不再读取 Tool 模块内部变量。
+- `tools=[...]` 保持完整替换语义，不自动附加默认 Tool。
+- 删除 `ALL_TOOLS` 和 `get_tool` 的公开入口，不提供兼容层。
+- `LLM` 提供统一的受保护流式解码器；两个后端仅负责请求参数、获得流和重试策略。
+- 解码器保留文本回调、用量累计、按调用索引合并工具调用、无效 JSON 回退为空字典及缺失可选字段容错。
+
+### 验证
+
+- 自动化测试验证两个默认 Agent 的 Tool、子 Agent 父引用和变更文件记录相互隔离。
+- 自动化测试验证两个后端通过公开 `chat()` 接口产生等价的文本、回调、用量、工具调用和容错结果。

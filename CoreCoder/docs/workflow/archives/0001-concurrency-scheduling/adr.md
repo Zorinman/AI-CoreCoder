@@ -2,7 +2,7 @@
 
 > **状态**：已实施并归档
 >
-> **关联 Spec**：[0001-concurrency-scheduling](../specs/0001-concurrency-scheduling.md)
+> **关联 Spec**：[spec.md](spec.md)
 >
 > **实现提交**：`d8a25c4`（2026-08-08）
 >

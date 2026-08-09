@@ -105,9 +105,9 @@ Agent 执行一批 tool_calls 时，按模型给出的原始顺序做"分段"：
 
 # Further Notes
 
-本 feature 是三份渐进 spec 中的第一份，后两份（[0002-fallback-chain-and-budget](0002-fallback-chain-and-budget.md)、
-[0003-mcp-integration](0003-mcp-integration.md)）在设计上依赖本 feature 建立的
+本 feature 是三份渐进 spec 中的第一份，后两份（[0002-fallback-chain-and-budget](../0002-fallback-chain-and-budget/spec.md)、
+[0003-mcp-integration](../../specs/0003-mcp-integration.md)）在设计上依赖本 feature 建立的
 `concurrency_safe` 默认拒绝惯例：子 agent 工具和 MCP 工具都会复用"默认不
 安全"这个规则，而不是各自重新发明一套判定标准。对应决策记录见
-`docs/adr/0001-concurrency-safety-whitelist.md`，项目词汇见
+`adr.md`，项目词汇见
 `CONTEXT.md` 中的"并发安全工具"和"分段调度"条目。

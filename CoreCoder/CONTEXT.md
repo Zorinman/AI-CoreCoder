@@ -40,3 +40,6 @@ _Avoid_: backend、客户端类型
 
 **MCP 工具前缀（`mcp_corecoder__`）**：
 所有从 MCP server 拉取的工具，注册到 Agent 时统一重命名为 `mcp_corecoder__<server名>__<工具原名>`（双下划线分隔），避免与内置工具或多个 MCP server 之间的工具名冲突。
+**Agent 运行状态（Agent runtime state）**
+由单个 `Agent` 持有的当前工作目录和已变更文件集合。该状态在该 Agent 的多次对话之间持续，但不与其他 Agent 共享。
+_Avoid_: 运行时模型状态、模块级全局状态
