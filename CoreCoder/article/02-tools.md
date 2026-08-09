@@ -1,14 +1,14 @@
 # 工具系统：让模型安全地动手
 
-上一篇那个循环里，有一步被我一带而过：执行工具。这一篇把它展开。
+上一篇介绍主循环时，执行工具这一环节只是一笔带过；这一篇专门展开说明。
 
-模型本身只会做一件事，根据上文吐出下文。它不能读你的文件，不能跑你的测试，不能往磁盘写一个字节。让它从「会说」变成「会做」的，是工具。工具是 agent 真正接触世界的那只手。所以一个 agent 强不强，很大程度上取决于它的工具设计得好不好：接口是否清晰、错误反馈是否到位、危险操作是否拦得住。
+模型本身只能根据上下文生成文本，不能读取文件、运行测试，也不能向磁盘写入内容。工具让它从「会说」变成「会做」，也是 agent 与外部环境发生实际交互的通道。因此，工具接口是否清晰、错误反馈是否准确、危险操作能否被拦截，直接影响 agent 的能力和可靠性。
 
-CoreCoder 给了模型七个工具：`bash`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`agent`。这一篇我们先看它们共同的骨架，再细抠其中两个最值得说的，最后我带你写一个自己的。
+CoreCoder 为模型提供了七个工具：`bash`、`read_file`、`write_file`、`edit_file`、`glob`、`grep` 和 `agent`。本篇先介绍它们共享的接口，再重点分析两个关键工具，最后实现一个自定义工具。
 
 ## 一个工具长什么样
 
-所有工具继承自 `tools/base.py` 里的 `Tool`，整个基类 27 行：
+所有工具继承自 `tools/base.py` 里的 `Tool`：
 
 ```python
 class Tool(ABC):
@@ -17,6 +17,9 @@ class Tool(ABC):
     name: str
     description: str
     parameters: dict  # JSON Schema for the function args
+
+    # 默认不允许与其他工具并发执行；只读、无共享状态的工具显式改为 True。
+    concurrency_safe: bool = False
 
     @abstractmethod
     def execute(self, **kwargs) -> str:
@@ -35,29 +38,26 @@ class Tool(ABC):
         }
 ```
 
-一个工具就是四样东西：一个名字，一段给模型看的描述，一份描述参数的 JSON Schema，一个真正干活的 `execute`。`schema()` 把前三样拼成 OpenAI function calling 要的格式，发给模型，模型据此决定要不要调、怎么填参数。
+一个工具由名字、供模型理解的描述、参数 JSON Schema、实际执行的 `execute` 方法，以及并发声明组成。`concurrency_safe` 默认值为 `False`；只有 `read_file`、`glob`、`grep` 等只读且没有共享可变状态的工具，会显式设为 `True`。`schema()` 将名称、描述和参数拼装为 OpenAI function calling 所需的格式，模型据此决定是否调用工具以及如何传参。
 
 这里有个设计选择值得点一句。CoreCoder 没有搞工具的继承体系，没有 `FileTool` 派生 `ReadTool` 派生什么的。每个工具就是 `Tool` 的一个直接子类，自己管自己。Claude Code 走得更彻底，公开拆解里它压根不用 class 继承，而是用一个 `buildTool()` 工厂函数，把名字、schema、执行逻辑、权限检查当作配置传进去，拼出一个工具对象。两者背后是同一个判断：工具之间没什么真正可共享的行为，硬套继承只会增加耦合。组合优于继承，在这种地方体现得特别干净。
 
-工具的注册也朴素到家，`tools/__init__.py` 里就是一个列表：
+默认工具不再在模块导入时注册成一个全局列表。它们由 `Agent._create_default_tools()` 在构造每个 agent 时新建：
 
 ```python
-ALL_TOOLS = [
-    BashTool(),
-    ReadFileTool(),
-    WriteFileTool(),
-    EditFileTool(),
-    GlobTool(),
-    GrepTool(),
-    AgentTool(),
-]
+def _create_default_tools(self) -> list[Tool]:
+    state = self._runtime_state
+    return [
+        BashTool(state), ReadFileTool(), WriteFileTool(state),
+        EditFileTool(state), GlobTool(), GrepTool(), AgentTool(),
+    ]
 ```
 
-想加工具，往这个列表里塞一个实例就行。这件事我们留到本篇最后真做一次。
+这里的 `state` 保存当前工作目录和已修改文件。`bash`、`write_file`、`edit_file` 共用同一个 agent 私有状态；两个不同的 agent 不会互相覆盖工作目录、改动记录或 `AgentTool` 的父引用。想扩展 CLI 的默认能力，就往这个工厂方法里加一个新实例。这件事我们留到本篇最后真做一次。
 
 ## edit_file：一个看着平平无奇的关键创新
 
-七个工具里，如果只能挑一个讲，我会挑 `edit_file`。因为「让模型修改一个已有文件」这个看似简单的需求，背后死过好几条路。
+七个工具中，最值得展开的是 `edit_file`。让模型修改已有文件看似简单，实际已经淘汰过多种不可靠的方案。
 
 第一条死路是让模型按行号打补丁，比如「把第 42 行换成这样」。问题是模型对行号的感知极不可靠，它脑子里的第 42 行和文件里真实的第 42 行经常对不上，差一行就改错地方。而且只要文件在前面被动过一次，后面所有行号全部漂移。
 
@@ -85,11 +85,11 @@ if occurrences > 1:
 new_content = content.replace(old_string, new_string, 1)
 ```
 
-精妙之处全在那个「恰好一次」。
+关键就在「恰好一次」这个约束。
 
 如果原文一次都没找到，说明模型记错了内容，工具不会瞎猜，而是把文件开头贴回去让它重新对照。如果原文出现了不止一次，工具拒绝执行，因为它没法确定模型想改的是哪一处，于是回一句「这段文字出现了 N 次，多带几行上下文让它唯一」。这句话不只是报错，它是在教模型怎么把请求修对：下一轮模型会自觉地把 `old_string` 扩到包含足够的上下文，直到它在全文里唯一。
 
-这个约束把「改文件」这件事从一个模糊问题变成了一个确定问题。模型不需要懂行号，不需要会算偏移，它只需要原样引用一段它想改的代码，工具来保证这段引用没有歧义。Claude Code 的系统提示词里专门叮嘱模型「old_string 必须在文件里唯一」，CoreCoder 的提示词里也有同一条规则。这是一个用约束换可靠性的典范设计。
+这一约束将模糊的「改文件」转化为确定的操作。模型不需要理解行号或计算偏移量，只需原样引用准备修改的内容，再由工具保证这段引用没有歧义。Claude Code 的系统提示词会明确要求 `old_string` 在文件中唯一，CoreCoder 也采用同一规则。这是以约束换取可靠性的典型设计。
 
 替换完，工具还会生成一段统一 diff 返回给模型和用户：
 
@@ -98,7 +98,7 @@ diff = _unified_diff(content, new_content, str(p))
 return f"Edited {file_path}\n{diff}"
 ```
 
-注意方向反过来了：让模型生成 diff 不可靠，但让工具生成 diff 给模型看，完全可靠。模型看着这段 diff 就能确认自己改对了没有。生成放在工具侧，消费放在模型侧，各司其职。
+这里的方向恰好相反：让模型生成 diff 往往不可靠，而由工具生成 diff 则完全可控。模型可以根据这段 diff 确认修改是否符合预期。生成交给工具，理解和决策交给模型，职责因此更加清晰。
 
 还有个容易被忽略的边角：编辑前先确认文件是 UTF-8 文本。
 
@@ -153,7 +153,7 @@ if warning:
 
 ## 动手：写你自己的第一个工具
 
-讲了这么多，不如真加一个。假设我们想给 agent 一个查当前时间的能力（模型自己是不知道现在几点的）。新建 `corecoder/tools/now.py`：
+说完设计，再实现一个工具。假设要让 agent 查询当前时间，而模型本身并不知道此刻的时间，可以新建 `corecoder/tools/now.py`：
 
 ```python
 """A tool that tells the agent the current time."""
@@ -175,19 +175,20 @@ class NowTool(Tool):
         return time.strftime("%Y-%m-%d %H:%M:%S")
 ```
 
-然后在 `tools/__init__.py` 里把它登记进去：
+然后在 `agent.py` 导入它，并把它加入 `_create_default_tools()` 返回的列表：
 
 ```python
-from .now import NowTool
+from .tools.now import NowTool
 
-ALL_TOOLS = [
-    BashTool(),
-    # ...原有的工具...
-    NowTool(),
-]
+def _create_default_tools(self) -> list[Tool]:
+    state = self._runtime_state
+    return [
+        BashTool(state), ReadFileTool(), WriteFileTool(state),
+        EditFileTool(state), GlobTool(), GrepTool(), AgentTool(), NowTool(),
+    ]
 ```
 
-就这样。没有别的步骤。重新跑 `corecoder`，问它「现在几点」，你会看到它调 `now`，再用结果回答你。
+完成后重新运行 `corecoder`，询问「现在几点」，它就会调用 `now` 并根据结果作答。
 
 回头看你写了什么。`name` 是模型用来点名调用的标识。`description` 是模型决定「什么时候该用这个工具」的唯一依据，所以这句话要写得像在跟一个聪明但没有先验知识的同事交代，告诉它这工具干嘛、什么场景下用。`parameters` 是空的，因为查时间不需要参数，但如果你的工具需要参数，这里就是那份 JSON Schema，模型照着它填。`execute` 返回一个字符串，这个字符串会原样变成一条 `tool` 消息喂回模型。
 
@@ -199,6 +200,6 @@ ALL_TOOLS = [
 - `edit_file` 的「唯一性搜索替换」是关键创新：用「原文必须在全文唯一」这个约束，把不可靠的「改文件」变成确定的操作，连报错都在教模型怎么改对。
 - 让模型生成 diff 不可靠，让工具生成 diff 给模型看完全可靠。生成与消费各归其位。
 - bash 的正则黑名单是防手滑的闸，不是安全边界。真要面对不可信场景，沙箱得自己补。把这点想清楚，比假装安全重要得多。
-- 加一个工具的成本极低：一个类加一行注册。这是 agent 可扩展性的来源。
+- 加一个工具的成本极低：一个类加进默认工具工厂，或者作为 `Agent(tools=[...])` 的显式工具集传入。这是 agent 可扩展性的来源。
 
 下一篇，我们看这只手背后接的是哪个大脑，以及怎么把任意一家的模型接进来、顺手算清楚花了多少钱。

@@ -1,19 +1,21 @@
 # 接入任意大模型，顺便把钱算清楚
 
-前两篇讲的是循环和工具，也就是 agent 的手脚。这一篇讲大脑接口：模型怎么接进来，流式输出怎么处理，provider 抽风了怎么扛，以及一个被很多教程跳过、但你上线后第一天就会关心的问题，这一轮到底花了多少钱。
+前两篇讨论循环和工具，也就是 agent 的执行机制。本篇转向模型接口：如何接入模型、如何处理流式输出、如何应对 provider 的瞬时故障，以及一个常被教程忽略却会直接影响使用的问题：这一轮调用花了多少钱。
 
-对应的文件是 `corecoder/llm.py`，336 行，是整个项目最大的单文件。它大，是因为它替你扛下了和真实 API 打交道时所有不优雅的部分。
+对应的文件是 `corecoder/llm.py`，300 行，是整个项目最大的单文件。它大，是因为它替你扛下了和真实 API 打交道时所有不优雅的部分。
 
 ## 一个赌注：大家都长得像 OpenAI
 
 `llm.py` 开头的注释把整个设计的赌注讲明白了：
 
-> 既然大多数 provider（DeepSeek、Qwen、Kimi、GLM、Ollama 等）都暴露了 OpenAI 兼容的接口，我们就直接用 openai SDK。换 provider 只需要改 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`，没了。
+> 既然大多数 provider（DeepSeek、Qwen、Kimi、GLM、Ollama 等）都暴露了 OpenAI 兼容的接口，我们就直接用 openai SDK。换 provider 主要是换主模型配置里的模型名、密钥和 Base URL。
 
-这个赌注在 2026 年基本是稳赢的。OpenAI 的 `/v1/chat/completions` 接口形状已经成了事实标准，国内外绝大多数模型服务要么原生兼容，要么提供一个兼容端点。所以 CoreCoder 的主力 `LLM` 类，本质上就是 openai 官方 SDK 外面薄薄一层包装。你想从 OpenAI 换到 DeepSeek，不改一行代码，改两个环境变量：
+这一选择在 2026 年已相当稳妥。OpenAI 的 `/v1/chat/completions` 接口已成为事实标准，国内外多数模型服务要么原生兼容，要么提供兼容端点。因此，CoreCoder 的主力 `LLM` 类本质上是对 openai 官方 SDK 的轻量封装。若要从 OpenAI 切换到 DeepSeek，无需修改代码，只需调整 `.env` 中的主模型配置：
 
 ```bash
-export OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com CORECODER_MODEL=deepseek-chat
+CORECODER_PRIMARY_MODEL=deepseek-chat
+CORECODER_PRIMARY_API_KEY=sk-...
+CORECODER_PRIMARY_BASE_URL=https://api.deepseek.com/v1
 ```
 
 这个「一套接口接住所有人」的选择，是 CoreCoder 能这么小的重要原因之一。它没有为每家 provider 写一个 adapter，因为它赌大家都会向 OpenAI 的形状靠拢。
@@ -57,7 +59,7 @@ for idx in sorted(tc_map):
     parsed.append(ToolCall(id=raw["id"], name=raw["name"], arguments=args))
 ```
 
-这里有个防御：如果累积出来的参数串不是合法 JSON（模型偶尔会吐出半截或者格式坏掉的参数），不是让整个流程崩掉，而是退化成一个空字典 `{}`，让这次调用带着空参数往下走，再由上一篇讲的参数校验去给模型一句「参数不对」的反馈。流式解析里，「坏数据要能优雅降级」是个反复出现的主题，因为流随时可能给你残缺的东西。
+这里还做了一层防御：如果累积后的参数不是合法 JSON，例如模型只返回半截内容或参数格式损坏，流程不会直接中断，而是退化为空字典 `{}`。随后由上一篇介绍的参数校验向模型反馈「参数不正确」。流式解析必须能够优雅处理坏数据，因为流随时可能携带不完整内容。
 
 文本部分还支持一个 `on_token` 回调，每收到一截文本就喊一声，CLI 拿这个回调实现「打字机」效果，让你看着字一个个冒出来，而不是干等几十秒蹦出一整段。
 
@@ -85,7 +87,7 @@ if chunk.usage:
 
 ## provider 抽风了，自己扛
 
-这是上一篇结尾埋的伏笔。主循环 `agent.py` 里没有任何重试逻辑，因为重试被下放到了这一层。`_call_with_retry` 负责扛住瞬时故障：
+主循环 `agent.py` 不包含重试逻辑，因为这项职责被下放到模型接口层。`_call_with_retry` 专门处理瞬时故障：
 
 ```python
 def _call_with_retry(self, params: dict, max_retries: int = 3):
@@ -110,7 +112,7 @@ def _call_with_retry(self, params: dict, max_retries: int = 3):
 
 逻辑是经典的指数退避：限流、超时、连接错误这类一看就是瞬时的故障，等 1 秒、2 秒、4 秒重试，最多三次还不行就放弃抛出去。服务端 5xx 也重试，但客户端 4xx（参数错、鉴权失败这种）绝不重试，因为重试一百次结果都一样，只是白等。
 
-这段重试逻辑值得专门点出来，因为「这么小的项目应该没空管重试吧」是个很自然的误会，而事实正相反。重试不但在，还考虑得相当周到，连基类 `APIError` 可能没有 `status_code` 属性都用 `getattr` 防住了（不同版本的 SDK 异常层级不一样，硬取属性会炸）。
+这段重试逻辑值得单独说明。项目规模小，并不意味着可以忽略重试；这里甚至考虑到基类 `APIError` 可能没有 `status_code` 属性，因此使用 `getattr` 防御。不同版本 SDK 的异常层级并不完全一致，直接访问属性可能导致新的异常。
 
 CoreCoder 现在也实现了这两道保护：模型耗尽自身重试后，`ModelChain` 会按 `Config` 配置的顺序尝试备用级别；进程级硬预算会在估算成本超过上限后拒绝新的请求。降级选择保持 provider 无关，价格仍由显式价目表提供；未列入价目表的模型无法估算成本，因此采用放行策略而不编造价格。
 
@@ -128,7 +130,7 @@ except BadRequestError:
 
 ## 不兼容 OpenAI 的，交给 LiteLLM
 
-`LiteLLM` 子类是给那些不走 OpenAI 兼容接口的 provider 准备的逃生通道。它继承 `LLM`，但绕开了父类构造函数里创建 openai client 的那步，转而把请求交给 `litellm` 这个库去路由，litellm 支持上百家 provider：
+`LiteLLM` 子类用于接入不提供 OpenAI 兼容接口的 provider。它继承 `LLM`，但跳过父类中创建 openai client 的步骤，改由 `litellm` 库路由请求；该库支持上百家 provider：
 
 ```python
 class LiteLLM(LLM):
@@ -142,15 +144,25 @@ class LiteLLM(LLM):
         # ...同样的指数退避...
 ```
 
-设了 `CORECODER_PROVIDER=litellm` 之后，你就能用 litellm 的模型串，比如 `anthropic/claude-3-haiku`、`bedrock/anthropic.claude-v2`、`vertex_ai/gemini-pro`。`drop_params=True` 是个贴心的开关，provider 不支持某个参数时自动丢掉而不是报错，省得你为每家去裁参数。绝大多数人用主路径就够了，LiteLLM 是那条「万一你的 provider 太特立独行」的后路。
+设置 `CORECODER_PRIMARY_BACKEND=litellm` 后，就可以使用 LiteLLM 的模型标识，例如 `anthropic/claude-3-haiku`、`bedrock/anthropic.claude-v2`、`vertex_ai/gemini-pro`。`PROVIDER` 只是供应商标识，不决定客户端类型。`drop_params=True` 会在 provider 不支持某个参数时自动忽略该参数，避免因参数差异直接报错。大多数场景使用 OpenAI 兼容路径即可；LiteLLM 为差异较大的 provider 提供统一入口。
+
+两条后端并不各自再写一遍流式解析。它们负责按各自协议拿到 `stream`，之后都调用继承来的 `_decode_stream()`：
+
+```python
+response = self._decode_stream(stream, on_token)
+self._record_usage(response.prompt_tokens, response.completion_tokens)
+return response
+```
+
+这一个解码器统一处理文本回调、按调用 index 拼接工具调用、无效 JSON 回退为空参数，以及最终 chunk 的 token 用量。这样 OpenAI 兼容后端与 LiteLLM 后端只在请求参数和重试策略上不同，流式响应的语义保持一致；修一次解析边角，两边同时生效。
 
 ## 把钱算出来
 
-知道了 token，算钱就是查表乘一乘。`llm.py` 里有一张按百万 token 计价的表（输入价、输出价）：
+拿到 token 用量后，成本计算就是按照价目表换算。`llm.py` 中维护了一张以百万 token 为单位的价格表，分别记录输入和输出单价：
 
 ```python
 _PRICING = {
-    "gpt-5.5": (5, 30),           # CoreCoder 默认就用它
+    "gpt-4.1": (2, 8),
     "deepseek-chat": (0.27, 1.10),
     "claude-sonnet-4-6": (3, 15),
     "kimi-k2.5": (0.6, 3),
@@ -179,25 +191,32 @@ def estimated_cost(self) -> float | None:
 Tokens: 12043 prompt + 3201 completion = 15244 total  (~$0.0621)
 ```
 
-当然，这只是估算，价目表会过时，缓存折扣、批量定价这些它都没算。但对「我这一通操作大概烧了多少钱」这个量级的感知，它足够了。一个让你对成本有体感的 agent，和一个让你月底看账单才心惊的 agent，体验是两回事。
+当然，这只是估算。价目表会随时间变化，缓存折扣和批量定价等因素也未纳入计算。不过，对于判断一次操作的大致成本，它已经足够。能够及时看到成本的 agent，与只能在账单到来后再追溯成本的 agent，使用体验截然不同。
 
 ## 配置从哪来
 
-最后串一下 `config.py`（57 行）。它从环境变量读配置，带一个合理的优先级：
+最后串一下 `config.py`。它不再把一堆扁平变量拼成一个模型，而是把主模型和每一级备用模型都解析成同一种不可变 `ModelConfig`：
 
 ```python
-api_key = (
-    os.getenv("CORECODER_API_KEY")
-    or os.getenv("OPENAI_API_KEY")
-    or ""
-)
+CORECODER_PRIMARY_MODEL=deepseek-chat
+CORECODER_PRIMARY_API_KEY=sk-...
+CORECODER_PRIMARY_BACKEND=openai_compatible
+CORECODER_PRIMARY_PROVIDER=deepseek
+CORECODER_PRIMARY_BASE_URL=https://api.deepseek.com/v1
+CORECODER_PRIMARY_TEMPERATURE=0
+CORECODER_PRIMARY_MAX_TOKENS=4096
+
+# 可选的第一个备用模型；启用时 MODEL 与 API_KEY 同样必填。
+CORECODER_FALLBACK_1_MODEL=anthropic/claude-haiku-4-5
+CORECODER_FALLBACK_1_API_KEY=sk-...
+CORECODER_FALLBACK_1_BACKEND=litellm
 ```
 
-专属变量优先，然后退到通用的 `OPENAI_API_KEY`。它还会从当前目录往上一直找到家目录，加载 `.env` 文件（`override=False`，不覆盖你已经设好的真环境变量）。这样你在项目目录放一个 `.env`，进来就能用，不用每次 export。小事，但顺手。
+备用编号必须从 1 连续递增；`MODEL` 与 `API_KEY` 必填，`BACKEND` 只能是 `openai_compatible` 或 `litellm`。CLI 的 `--model`、`--api-key`、`--base-url` 只覆盖主模型对应字段；其后才是进程环境变量、当前目录 `.env` 和默认生成参数。旧的 `OPENAI_*`、`CORECODER_MODEL` 等变量会明确报错并给出迁移目标，不再悄悄兼容。`Config` 解析完成后，`ModelChain.from_config()` 用同一条路径构造主备模型，因而温度、最大输出等参数不会在降级时丢失。
 
 ## 这一篇带走什么
 
-- 「大多数 provider 都兼容 OpenAI 接口」这个赌注，让整个 provider 层薄到只是 openai SDK 的一层包装，换 provider 就是换两个环境变量。
+- 「大多数 provider 都兼容 OpenAI 接口」这个赌注，让整个 provider 层薄到只是 openai SDK 的一层包装；切换兼容 provider 主要是改主模型配置，非兼容 provider 则切到 LiteLLM 后端。
 - 流式输出里，工具调用的参数是分片到达的，得按 index 累加再 `json.loads`，还要对坏数据优雅降级。
 - 重试该放在 provider 层，不该塞进主循环。指数退避只重试瞬时故障和 5xx，绝不重试 4xx。
 - CoreCoder 结合 provider 层的退避重试、按顺序的降级链和进程级硬预算。降级路由与 provider 无关，未知价格的模型采用放行策略。
