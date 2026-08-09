@@ -3,15 +3,24 @@
 import os
 import sys
 
-from corecoder.tools import ALL_TOOLS, get_tool
+from corecoder import LLM, Agent
+from corecoder.tools.bash import BashTool
+
+
+def _default_tools():
+    return Agent(llm=LLM.__new__(LLM)).tools
+
+
+def get_tool(name: str):
+    return next(tool for tool in _default_tools() if tool.name == name)
 
 
 def test_tool_count():
-    assert len(ALL_TOOLS) == 7
+    assert len(_default_tools()) == 7
 
 
 def test_all_tools_have_valid_schema():
-    for t in ALL_TOOLS:
+    for t in _default_tools():
         s = t.schema()
         assert s["type"] == "function"
         assert "name" in s["function"]
@@ -91,44 +100,22 @@ def test_bash_blocks_pipe_to_sh():
 
 def test_bash_chained_cd_resolves_sequentially(tmp_path):
     """`cd a && cd b` must end in a/b, not resolve both against the start dir."""
-    import corecoder.tools.bash as bash_mod
-
     (tmp_path / "a" / "b").mkdir(parents=True)
-    saved = getattr(bash_mod._local, "cwd", None)
-    try:
-        bash_mod._local.cwd = None
-        bash_mod._update_cwd(f"cd {tmp_path} && cd a && cd b", str(tmp_path))
-        assert bash_mod._local.cwd == os.path.normpath(str(tmp_path / "a" / "b"))
-    finally:
-        bash_mod._local.cwd = saved
+    bash = BashTool()
+    bash._update_cwd(f"cd {tmp_path} && cd a && cd b", str(tmp_path))
+    assert bash._state.cwd == os.path.normpath(str(tmp_path / "a" / "b"))
 
 
-def test_bash_cwd_is_thread_local(tmp_path):
-    """Parallel bash calls must not race on a shared cwd: each thread tracks its own."""
-    import threading
-
-    import corecoder.tools.bash as bash_mod
-
+def test_bash_cwd_is_tool_local(tmp_path):
+    """Separate Bash tools must not share a working directory."""
     (tmp_path / "ta").mkdir()
     (tmp_path / "tb").mkdir()
-    seen = {}
-
-    def worker(name, target):
-        bash_mod._update_cwd(f"cd {target}", str(tmp_path))
-        seen[name] = getattr(bash_mod._local, "cwd", None)
-
-    threads = [
-        threading.Thread(target=worker, args=("a", tmp_path / "ta")),
-        threading.Thread(target=worker, args=("b", tmp_path / "tb")),
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    # each thread reads back exactly the cwd it set, with no cross-thread clobber
-    assert seen["a"] == os.path.normpath(str(tmp_path / "ta"))
-    assert seen["b"] == os.path.normpath(str(tmp_path / "tb"))
+    first = BashTool()
+    second = BashTool()
+    first._update_cwd(f"cd {tmp_path / 'ta'}", str(tmp_path))
+    second._update_cwd(f"cd {tmp_path / 'tb'}", str(tmp_path))
+    assert first._state.cwd == os.path.normpath(str(tmp_path / "ta"))
+    assert second._state.cwd == os.path.normpath(str(tmp_path / "tb"))
 
 
 def test_bash_truncates_long_output():

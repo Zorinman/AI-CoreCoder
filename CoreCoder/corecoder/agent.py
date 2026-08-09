@@ -11,13 +11,20 @@ which means it's done working and ready to report back.
 
 import concurrent.futures
 import inspect
-from .llm import LLM
-from .tools import ALL_TOOLS
-from .tools.base import Tool
-from .tools.agent import AgentTool
-from .prompt import system_prompt
+
 from .context import ContextManager
 from .fallback import BudgetExceededError, ModelChain
+from .llm import LLM
+from .prompt import system_prompt
+from .tools.agent import AgentTool
+from .tools.base import Tool
+from .tools.bash import BashTool
+from .tools.edit import EditFileTool
+from .tools.glob_tool import GlobTool
+from .tools.grep import GrepTool
+from .tools.read import ReadFileTool
+from .tools.runtime import ToolRuntimeState
+from .tools.write import WriteFileTool
 
 
 class Agent:
@@ -31,7 +38,8 @@ class Agent:
     ):
         self.llm = model_chain if model_chain is not None else llm
         self.model_chain = self.llm if isinstance(self.llm, ModelChain) else model_chain
-        self.tools = tools if tools is not None else ALL_TOOLS
+        self._runtime_state = ToolRuntimeState()
+        self.tools = tools if tools is not None else self._create_default_tools()
         self._tool_by_name = {t.name: t for t in self.tools}
         self.messages: list[dict] = []
         self.context = ContextManager(max_tokens=max_context_tokens)
@@ -42,6 +50,23 @@ class Agent:
         for t in self.tools:
             if isinstance(t, AgentTool):
                 t._parent_agent = self
+
+    def _create_default_tools(self) -> list[Tool]:
+        state = self._runtime_state
+        return [
+            BashTool(state),
+            ReadFileTool(),
+            WriteFileTool(state),
+            EditFileTool(state),
+            GlobTool(),
+            GrepTool(),
+            AgentTool(),
+        ]
+
+    @property
+    def changed_files(self) -> frozenset[str]:
+        """Return the files changed by this Agent as a read-only snapshot."""
+        return frozenset(self._runtime_state.changed_files)
 
     def _full_messages(self) -> list[dict]:
         return [{"role": "system", "content": self._system}] + self.messages

@@ -1,8 +1,9 @@
 """File creation / overwrite."""
 
 from pathlib import Path
+
 from .base import Tool
-from .edit import _changed_files
+from .runtime import ToolRuntimeState
 
 
 class WriteFileTool(Tool):
@@ -26,12 +27,15 @@ class WriteFileTool(Tool):
         "required": ["file_path", "content"],
     }
 
+    def __init__(self, state: ToolRuntimeState | None = None):
+        self._state = state if state is not None else ToolRuntimeState()
+
     def execute(self, file_path: str, content: str) -> str:
         try:
             p = Path(file_path).expanduser().resolve()
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
-            _changed_files.add(str(p))
+            self._state.changed_files.add(str(p))
             n_lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
             return f"Wrote {n_lines} lines to {file_path}"
         except Exception as e:

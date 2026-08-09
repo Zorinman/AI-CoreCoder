@@ -10,9 +10,7 @@ import difflib
 from pathlib import Path
 
 from .base import Tool
-
-# track files changed this session for /diff
-_changed_files: set[str] = set()
+from .runtime import ToolRuntimeState
 
 
 class EditFileTool(Tool):
@@ -41,6 +39,9 @@ class EditFileTool(Tool):
         "required": ["file_path", "old_string", "new_string"],
     }
 
+    def __init__(self, state: ToolRuntimeState | None = None):
+        self._state = state if state is not None else ToolRuntimeState()
+
     def execute(self, file_path: str, old_string: str, new_string: str) -> str:
         try:
             p = Path(file_path).expanduser().resolve()
@@ -67,7 +68,7 @@ class EditFileTool(Tool):
 
             new_content = content.replace(old_string, new_string, 1)
             p.write_text(new_content, encoding="utf-8")
-            _changed_files.add(str(p))
+            self._state.changed_files.add(str(p))
 
             # generate a unified diff so the user/LLM can see exactly what changed
             diff = _unified_diff(content, new_content, str(p))

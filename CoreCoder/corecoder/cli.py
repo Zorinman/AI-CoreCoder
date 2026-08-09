@@ -191,12 +191,12 @@ def _repl(agent: Agent, config: Config, model_override: str | None = None):
             console.print(f"Resume with: corecoder -r {sid}")
             continue
         if user_input == "/diff":
-            from .tools.edit import _changed_files
-            if not _changed_files:
+            changed_files = agent.changed_files
+            if not changed_files:
                 console.print("[dim]No files modified this session.[/dim]")
             else:
-                console.print(f"[bold]Files modified this session ({len(_changed_files)}):[/bold]")
-                for f in sorted(_changed_files):
+                console.print(f"[bold]Files modified this session ({len(changed_files)}):[/bold]")
+                for f in sorted(changed_files):
                     console.print(f"  [cyan]{f}[/cyan]")
             continue
         if user_input == "/sessions":

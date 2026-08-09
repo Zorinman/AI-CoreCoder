@@ -13,7 +13,7 @@ import json
 import time
 from dataclasses import dataclass, field
 
-from openai import OpenAI, APIError, BadRequestError, RateLimitError, APITimeoutError, APIConnectionError
+from openai import APIConnectionError, APIError, APITimeoutError, BadRequestError, OpenAI, RateLimitError
 
 
 @dataclass
@@ -156,6 +156,61 @@ class LLM:
         counts["prompt_tokens"] += prompt_tokens
         counts["completion_tokens"] += completion_tokens
 
+    def _decode_stream(self, stream, on_token=None) -> LLMResponse:
+        """Decode the common OpenAI-style streaming response contract."""
+        content_parts: list[str] = []
+        tc_map: dict[int, dict] = {}
+        prompt_tok = 0
+        completion_tok = 0
+
+        for chunk in stream:
+            usage = getattr(chunk, "usage", None)
+            if usage:
+                prompt_tok = getattr(usage, "prompt_tokens", 0) or 0
+                completion_tok = getattr(usage, "completion_tokens", 0) or 0
+
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+
+            content = getattr(delta, "content", None)
+            if content:
+                content_parts.append(content)
+                if on_token:
+                    on_token(content)
+
+            for tc_delta in getattr(delta, "tool_calls", None) or []:
+                idx = tc_delta.index
+                if idx not in tc_map:
+                    tc_map[idx] = {"id": "", "name": "", "args": ""}
+                if tc_delta.id:
+                    tc_map[idx]["id"] = tc_delta.id
+                function = getattr(tc_delta, "function", None)
+                if function:
+                    if function.name:
+                        tc_map[idx]["name"] = function.name
+                    if function.arguments:
+                        tc_map[idx]["args"] += function.arguments
+
+        parsed: list[ToolCall] = []
+        for idx in sorted(tc_map):
+            raw = tc_map[idx]
+            try:
+                args = json.loads(raw["args"])
+            except (json.JSONDecodeError, KeyError):
+                args = {}
+            parsed.append(ToolCall(id=raw["id"], name=raw["name"], arguments=args))
+
+        return LLMResponse(
+            content="".join(content_parts),
+            tool_calls=parsed,
+            prompt_tokens=prompt_tok,
+            completion_tokens=completion_tok,
+        )
+
     def chat(
         self,
         messages: list[dict],
@@ -182,61 +237,9 @@ class LLM:
             params.pop("stream_options", None)
             stream = self._call_with_retry(params)
 
-        content_parts: list[str] = []
-        tc_map: dict[int, dict] = {}  # index -> {id, name, arguments_str}
-        prompt_tok = 0
-        completion_tok = 0
-
-        for chunk in stream:
-            # usage info comes in the final chunk
-            if chunk.usage:
-                # some providers send usage with null fields; coerce to 0 so the
-                # running totals below don't blow up on int + None
-                prompt_tok = chunk.usage.prompt_tokens or 0
-                completion_tok = chunk.usage.completion_tokens or 0
-
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-
-            # accumulate text
-            if delta.content:
-                content_parts.append(delta.content)
-                if on_token:
-                    on_token(delta.content)
-
-            # accumulate tool calls across chunks
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tc_map:
-                        tc_map[idx] = {"id": "", "name": "", "args": ""}
-                    if tc_delta.id:
-                        tc_map[idx]["id"] = tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            tc_map[idx]["name"] = tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            tc_map[idx]["args"] += tc_delta.function.arguments
-
-        # parse accumulated tool calls
-        parsed: list[ToolCall] = []
-        for idx in sorted(tc_map):
-            raw = tc_map[idx]
-            try:
-                args = json.loads(raw["args"])
-            except (json.JSONDecodeError, KeyError):
-                args = {}
-            parsed.append(ToolCall(id=raw["id"], name=raw["name"], arguments=args))
-
-        self._record_usage(prompt_tok, completion_tok)
-
-        return LLMResponse(
-            content="".join(content_parts),
-            tool_calls=parsed,
-            prompt_tokens=prompt_tok,
-            completion_tokens=completion_tok,
-        )
+        response = self._decode_stream(stream, on_token)
+        self._record_usage(response.prompt_tokens, response.completion_tokens)
+        return response
 
     def _call_with_retry(self, params: dict, max_retries: int = 3):
         """Retry on transient errors with exponential backoff."""
@@ -308,56 +311,9 @@ class LiteLLM(LLM):
         params["stream_options"] = {"include_usage": True}
         stream = self._call_with_retry(params)
 
-        content_parts: list[str] = []
-        tc_map: dict[int, dict] = {}
-        prompt_tok = 0
-        completion_tok = 0
-
-        for chunk in stream:
-            usage = getattr(chunk, "usage", None)
-            if usage:
-                prompt_tok = getattr(usage, "prompt_tokens", 0) or 0
-                completion_tok = getattr(usage, "completion_tokens", 0) or 0
-
-            if not getattr(chunk, "choices", None):
-                continue
-            delta = chunk.choices[0].delta
-
-            if getattr(delta, "content", None):
-                content_parts.append(delta.content)
-                if on_token:
-                    on_token(delta.content)
-
-            if getattr(delta, "tool_calls", None):
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tc_map:
-                        tc_map[idx] = {"id": "", "name": "", "args": ""}
-                    if tc_delta.id:
-                        tc_map[idx]["id"] = tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            tc_map[idx]["name"] = tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            tc_map[idx]["args"] += tc_delta.function.arguments
-
-        parsed: list[ToolCall] = []
-        for idx in sorted(tc_map):
-            raw = tc_map[idx]
-            try:
-                args = json.loads(raw["args"])
-            except (json.JSONDecodeError, KeyError):
-                args = {}
-            parsed.append(ToolCall(id=raw["id"], name=raw["name"], arguments=args))
-
-        self._record_usage(prompt_tok, completion_tok)
-
-        return LLMResponse(
-            content="".join(content_parts),
-            tool_calls=parsed,
-            prompt_tokens=prompt_tok,
-            completion_tokens=completion_tok,
-        )
+        response = self._decode_stream(stream, on_token)
+        self._record_usage(response.prompt_tokens, response.completion_tokens)
+        return response
 
     def _call_with_retry(self, params: dict, max_retries: int = 3):
         """Retry on transient errors with exponential backoff via litellm."""

@@ -2,12 +2,12 @@
 
 import os
 
-from corecoder import Agent, LLM, Config, ALL_TOOLS, __version__
+from corecoder import LLM, Agent, Config, __version__
 from corecoder import session as session_module
 from corecoder.context import ContextManager, estimate_tokens
-from corecoder.session import save_session, load_session, list_sessions
-from corecoder.tools import get_tool
+from corecoder.session import list_sessions, load_session, save_session
 from corecoder.tools.base import Tool
+from corecoder.tools.read import ReadFileTool
 
 
 def test_version():
@@ -19,7 +19,8 @@ def test_public_api_exports():
     assert Agent is not None
     assert LLM is not None
     assert Config is not None
-    assert len(ALL_TOOLS) == 7
+    import corecoder
+    assert not hasattr(corecoder, "ALL_TOOLS")
 
 
 def _isolate_config_environment(tmp_path, monkeypatch):
@@ -174,34 +175,29 @@ def test_cost_knowledge_is_exposed_by_the_llm_interface():
     assert unknown.has_known_cost is False
 
 
-# --- Changed files tracking ---
+# --- Agent-owned default tools and runtime state ---
 
-def test_edit_tracks_changed_files(tmp_path):
-    from corecoder.tools.edit import _changed_files
-    _changed_files.clear()
-    edit = get_tool("edit_file")
-    path = tmp_path / "sample.py"
-    path.write_text("aaa\nbbb\n")
-    edit.execute(file_path=str(path), old_string="aaa", new_string="zzz")
-    assert any(str(path) in p for p in _changed_files)
-    _changed_files.clear()
+def test_default_agents_keep_tools_and_changed_files_isolated(tmp_path):
+    first = Agent(llm=LLM.__new__(LLM))
+    second = Agent(llm=LLM.__new__(LLM))
 
+    first_by_name = {tool.name: tool for tool in first.tools}
+    second_by_name = {tool.name: tool for tool in second.tools}
+    assert first_by_name["agent"] is not second_by_name["agent"]
+    assert first_by_name["agent"]._parent_agent is first
+    assert second_by_name["agent"]._parent_agent is second
 
-def test_write_tracks_changed_files(tmp_path):
-    from corecoder.tools.edit import _changed_files
-    _changed_files.clear()
-    write = get_tool("write_file")
     path = tmp_path / "tracked.txt"
-    write.execute(file_path=str(path), content="tracked\n")
-    assert any(path.name in p for p in _changed_files)
-    _changed_files.clear()
+    first_by_name["write_file"].execute(file_path=str(path), content="tracked\n")
+    assert first.changed_files == frozenset({str(path)})
+    assert second.changed_files == frozenset()
 
 
 # --- Agent tool execution ---
 
 def test_agent_tool_scope_is_per_instance():
     """An Agent restricted to a subset of tools must not resolve tools outside it."""
-    only_read = [get_tool("read_file")]
+    only_read = [ReadFileTool()]
     agent = Agent(llm=LLM.__new__(LLM), tools=only_read)
     assert set(agent._tool_by_name) == {"read_file"}
 
