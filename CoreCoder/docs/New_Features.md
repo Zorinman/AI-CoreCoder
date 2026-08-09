@@ -46,7 +46,7 @@
 对应归档 Spec：[docs/archives/0004-unified-model-configuration.md](archives/0004-unified-model-configuration.md)
 对应归档 ADR：[docs/archives/0004-immutable-symmetric-model-configuration.md](archives/0004-immutable-symmetric-model-configuration.md)
 
-**状态**：已实现，待提交
+**状态**：已归档
 
 ### 问题
 
