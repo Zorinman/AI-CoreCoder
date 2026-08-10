@@ -38,8 +38,17 @@ _Avoid_: backend、客户端类型
 **硬预算上限（hard budget cap）**：
 由 `CORECODER_MAX_COST_USD` 环境变量设置的美元金额上限，统计范围为单进程生命周期内的累计估算成本（跨主模型/降级模型分模型累加）。在每轮 `chat()` 发起 LLM 请求前检查；一旦当前累计成本已超过上限，直接拒绝新一轮 LLM 调用并返回提示，不中断已经开始的调用，不终止进程。当前模型不在定价表内（无法估算成本）时放行（fail open）。用户可用 `/budget <金额>` 在不重启进程的前提下当场调高上限。
 
-**MCP 工具前缀（`mcp_corecoder__`）**：
-所有从 MCP server 拉取的工具，注册到 Agent 时统一重命名为 `mcp_corecoder__<server名>__<工具原名>`（双下划线分隔），避免与内置工具或多个 MCP server 之间的工具名冲突。
-**Agent 运行状态（Agent runtime state）**
+**MCP 模型可见工具名（model-visible MCP tool name）**：
+MCP 工具向模型暴露时使用的稳定名称，格式为 `mcp__<server配置键>__<工具原名>`。server 配置键来自用户提供的 `mcpServers` 配置，不使用 server 自报名称；名称规范化后仍发生冲突时，MCP 配置无效。
+_Avoid_: MCP 工具原名、server 自报工具名
+
+**MCP 工具快照（MCP tool snapshot）**：
+Agent 启动时从所有成功连接的 MCP server 获取并固定下来的工具集合。运行期间不动态修改该集合；收到工具列表变化通知时，当前快照视为过期，并提示用户重启 CoreCoder。
+
+**MCP Server 配置（MCP server configuration）**：
+用户拥有的 `mcpServers` 配置文件，默认位置为 `~/.corecoder/mcp.json`，表示用户授权 CoreCoder 启动其中声明的 stdio server。CLI 可以临时覆盖或禁用该配置；项目目录及其 `.env` 不会决定启动哪些 MCP server。
+_Avoid_: 工作区自动配置、MCP Server 注册表
+
+**Agent 运行状态（Agent runtime state）**：
 由单个 `Agent` 持有的当前工作目录和已变更文件集合。该状态在该 Agent 的多次对话之间持续，但不与其他 Agent 共享。
 _Avoid_: 运行时模型状态、模块级全局状态

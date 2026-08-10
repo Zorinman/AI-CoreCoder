@@ -154,7 +154,11 @@ CoreCoder 目前只有单一主模型配置（`config.py`/环境变量）和针�
 中确立的"默认不安全/不并发"惯例：子 agent 工具本身在那份 spec 中已被列为
 永久不安全（不并发），这里进一步要求子 agent 与父 Agent 共享降级/预算状态，
 两者是一致的设计方向（子 agent 不应绕过父 Agent 的任何安全或成本约束）。
-第三份 spec（[0003-mcp-integration](../../specs/0003-mcp-integration.md)）同样要求子
-agent 默认共享父 Agent 的预算/熔断状态，但默认不继承 MCP 工具。对应决策记
+原计划中的第三份 spec（0003 MCP 方案）同样要求子
+agent 默认共享父 Agent 的预算/熔断状态，但其工具继承规则已被后续决策取代。对应决策记
 录见 `adr.md`，项目词汇见
 `CONTEXT.md` 中的"降级链""熔断""硬预算上限"条目。
+
+## 后续决策更新（0006）
+
+原 0003 MCP 方案已废弃，当前 MCP 接入由 [0006 MCP 客户端工具接入](../../specs/0006_specs_mcp-client-integration.md) 取代。子 Agent 仍与父 Agent 共享同一个 `ModelChain`、预算累计和熔断状态；同时，子 Agent 继承父 Agent 的附加工具，包括 MCP 工具，但重新创建自己的内置有状态工具和 Agent 运行状态。本更新不改变本 feature 已归档的预算与降级行为。
