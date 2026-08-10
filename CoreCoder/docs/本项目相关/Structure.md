@@ -12,6 +12,9 @@ Config -- ModelChain.from_config() -> ModelChain -> Agent
                                                    |-> ContextManager
                                                    |-> Tool 列表
 
+用户 MCP 配置 -- load_mcp_config() -> McpServerConfig[] -> McpRuntime -> McpTool[]
+                                                                  |-> 作为 Agent.extra_tools 追加
+
 Agent.chat() -> ModelChain.chat() -> 当前 LLM.chat() -> LLMResponse
                                                     -> ToolCall[] -> Tool.execute()
                                                                   -> 工具结果写回 messages
@@ -358,6 +361,7 @@ class Agent:
         self,
         llm: LLM | ModelChain,
         tools: list[Tool] | None = None,
+        extra_tools: list[Tool] | None = None,
         max_context_tokens: int = 128_000,
         max_rounds: int = 50,
         model_chain: ModelChain | None = None,
@@ -365,7 +369,9 @@ class Agent:
         self.llm = model_chain if model_chain is not None else llm
         self.model_chain = self.llm if isinstance(self.llm, ModelChain) else model_chain
         self._runtime_state = ToolRuntimeState()
-        self.tools = tools if tools is not None else self._create_default_tools()
+        self.extra_tools = list(extra_tools or [])
+        base_tools = tools if tools is not None else self._create_default_tools()
+        self.tools = [*base_tools, *self.extra_tools]
         self._tool_by_name = {t.name: t for t in self.tools}
         self.messages: list[dict] = []
         self.context = ContextManager(max_tokens=max_context_tokens)
@@ -642,7 +648,11 @@ flowchart LR
     U["用户"] --> CLI["CLI"]
     CLI --> CFG["Config"]
     CFG --> CHAIN["ModelChain + BudgetState"]
+    CLI --> MCPCFG["用户 MCP 配置"]
+    MCPCFG --> MCPRT["McpRuntime"]
+    MCPRT -->|发现工具| MCPTOOLS["McpTool[]"]
     CLI --> A["Agent"]
+    MCPTOOLS -->|extra_tools| A
     A --> CHAIN
     CHAIN --> LLM["当前 LLM 抽象层"]
     LLM -->|OpenAI| OAI["OpenAI 兼容接口"]
@@ -659,15 +669,18 @@ flowchart LR
 | 节点            | 功能                                            |
 | --------------- | ----------------------------------------------- |
 | 用户            | 提交问题并接收最终回复。                        |
-| CLI             | 读取 Config，创建模型链，接收输入并显示结果。   |
+| CLI             | 读取模型配置与用户 MCP 配置，创建模型链和 Agent，接收输入并显示结果。 |
 | Config          | 集中解析主模型、备用级别和硬预算。              |
+| 用户 MCP 配置   | 用户明确授权的 `mcp.json`；不由项目目录、`.env` 或会话决定。 |
+| McpRuntime      | 连接 MCP Server、发现工具，并在后台事件循环中管理调用与关闭。 |
+| McpTool[]       | 经命名空间隔离的外部 Tool 适配器，作为 `extra_tools` 追加给 Agent。 |
 | ModelChain + BudgetState | 在预算允许时选择当前模型，并维护降级与熔断状态。 |
 | Agent           | 管理消息历史，经模型链发起请求，分派 Tool 并控制循环。 |
 | 当前 LLM 抽象层 | 统一封装当前模型后端的调用方式。                |
 | OpenAI 兼容接口 | 调用 OpenAI 或兼容 OpenAI 协议的模型服务。      |
 | LiteLLM 接口    | 通过 LiteLLM 调用其他模型供应商。               |
 | LLMResponse     | 保存 LLM 返回的文本、ToolCall 和 Token 信息。   |
-| Tool 集合       | 执行文件、命令、搜索或子 Agent 等操作。         |
+| Tool 集合       | 执行内置文件、命令、搜索、子 Agent 或 MCP 外部操作。 |
 
 ## 2. 调用流程图
 

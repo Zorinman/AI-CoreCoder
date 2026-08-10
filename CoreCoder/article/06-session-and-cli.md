@@ -35,7 +35,7 @@ def on_tool(name, kwargs):
 response = agent.chat(user_input, on_token=on_token, on_tool=on_tool)
 ```
 
-`on_token` 让模型的文字一个个实时冒出来，就是第三篇流式那一层在界面上的样子。`on_tool` 在每次调工具前打一行灰字，告诉你「它正要去读哪个文件、跑哪条命令」。这两个回调是 agent 内核和界面之间唯一的耦合点，内核不关心你怎么显示，只在该出事件的时候喊一声，界面爱怎么呈现是界面的事。这种「内核出事件、外壳管呈现」的切分很干净，你想把 CoreCoder 嵌进别的程序（比如一个 web 服务），只要换掉这两个回调就行，内核一行不用动。第七篇会用到这个性质。
+`on_token` 让模型的文字一个个实时冒出来，就是第三篇流式那一层在界面上的样子。`on_tool` 在每次调工具前打一行灰字，告诉你「它正要去读哪个文件、跑哪条命令或调用哪个 MCP 工具」。显示前会按参数名递归隐藏 `key`、`token`、`secret`、`password`、`auth` 和 `credential` 等敏感值。两个回调是 agent 内核和界面之间唯一的耦合点，内核不关心你怎么显示，只在该出事件的时候喊一声，界面爱怎么呈现是界面的事。这种「内核出事件、外壳管呈现」的切分很干净，你想把 CoreCoder 嵌进别的程序（比如一个 web 服务），只要换掉这两个回调就行，内核一行不用动。第七篇会用到这个性质。
 
 ## 斜杠命令：在不打断对话的前提下管状态
 
@@ -43,6 +43,7 @@ REPL 里认一批斜杠命令，它们不发给模型，而是直接操作 agent
 
 ```
 /help      显示帮助
+/mcp       显示已连接 MCP Server 及每个 Server 的工具数量
 /reset     清空对话历史
 /model     查看或切换模型
 /tokens    显示 token 用量和估算花费
@@ -53,9 +54,22 @@ REPL 里认一批斜杠命令，它们不发给模型，而是直接操作 agent
 /sessions  列出已存的会话
 ```
 
-这些命令将前几篇介绍的核心能力直接暴露给用户。`/tokens` 调用第三篇的 `estimated_cost`，`/budget <usd>` 只能提高当前 `BudgetState` 的上限，`/compact` 调用第四篇的 `maybe_compress`，`/diff` 则读取当前 `Agent.changed_files` 的只读快照。改动记录属于 agent 私有的工具运行状态，而不是某个工具模块的全局变量；CLI 只是为这些能力提供了直接入口。
+这些命令将前几篇介绍的核心能力直接暴露给用户。`/tokens` 调用第三篇的 `estimated_cost`，`/budget <usd>` 只能提高当前 `BudgetState` 的上限，`/compact` 调用第四篇的 `maybe_compress`，`/diff` 则读取当前 `Agent.changed_files` 的只读快照。`/mcp` 只输出已经连接的 Server 和工具数量，不暴露工具名称或配置中的敏感值。改动记录属于 agent 私有的工具运行状态，而不是某个工具模块的全局变量；CLI 只是为这些能力提供了直接入口。
 
-启动面板也遵守同一条边界：只显示 ZorinHelper 名称、主模型和各备用模型的名称及 Base URL，不显示 API key、provider、backend 或预算信息。需要排障时，库层的 `Config.summary()` 和 `ModelChain.status()` 提供脱敏后的配置与运行时状态。
+## MCP：由启动参数决定外部工具边界
+
+MCP 不属于项目 `.env`、项目文件或会话历史能够决定的范围。CLI 默认只读取用户主目录的 `~/.corecoder/mcp.json`；也可以使用 `--mcp-config PATH` 为单次启动指定配置，或使用 `--no-mcp` 完全跳过 MCP。两项参数互斥。
+
+```bash
+corecoder --mcp-config ./mcp-firecrawl.json
+corecoder --no-mcp
+```
+
+CLI 在构造 Agent 前启动 `McpRuntime`、连接配置的 Server 并发现工具，再将结果作为 `extra_tools` 传入 Agent。启动时会逐个输出 Server 的连接状态和工具数量；若保存的会话曾使用 MCP 工具、而本次未启用 MCP，也会显示提示而不会自动连接。
+
+运行中 Server 的工具清单变化时，当前 Agent 继续使用启动快照，REPL 会在下一次提示前要求重启 CoreCoder。进程退出或后续启动异常时，`finally` 块负责关闭 Runtime、会话和 stdio 子进程。传输、配置格式和限制见[第八篇](08-mcp-client.md)。
+
+MCP 连接摘要显示在启动面板之前；启动面板本身只显示 ZorinHelper 名称、主模型和各备用模型的名称及 Base URL，不显示 API key、provider、backend 或预算信息。需要排障时，库层的 `Config.summary()` 和 `ModelChain.status()` 提供脱敏后的配置与运行时状态。
 
 `/model <name>` 只修改当前主模型客户端的运行时模型名并重置熔断状态，不会更改启动配置、连接信息或备用链。这个命令适合临时试用另一模型，不是重新配置模型供应商的入口。
 
@@ -169,4 +183,4 @@ Claude Code 的会话与查询引擎（公开拆解里上千行）远比这复�
 - 会话 id 会从用户来，路径穿越是真实威胁。用纵深防御应对：一道净化输入，一道校验落点，两道思路不同所以不会一起失效。
 - 坏数据就该安静降级：存档损坏返回 `None`，别拿异常栈砸用户。
 
-下一篇是收尾，也是最实操的一篇：把这六篇拆开看过的零件重新装起来，带你 fork CoreCoder，改出一个真正属于你自己的 coding agent。
+下一篇是实操篇：把这六篇拆开看过的零件重新装起来，带你 fork CoreCoder，改出一个真正属于你自己的 coding agent。完成后可继续阅读第八篇，了解如何受控地接入 MCP 工具生态。
