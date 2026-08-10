@@ -4,7 +4,7 @@
 
 **Blocked by**：None — can start immediately
 
-**Status**：ready-for-agent
+**Status**：completed
 
 - [ ] `tools=` 继续表示 Agent 的完整工具集合；未提供时使用默认工具，显式空集合能够构造无工具 Agent。
 - [ ] 新增 `extra_tools=`，按确定顺序追加到默认工具或显式 `tools` 集合之后。

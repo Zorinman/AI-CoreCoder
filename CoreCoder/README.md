@@ -80,6 +80,31 @@ corecoder                                             # interactive REPL
 corecoder -p "add error handling to parse_config()"   # one-shot mode, exits when done
 ```
 
+## MCP tools
+
+CoreCoder can use tools from local MCP stdio servers and remote Streamable HTTP servers. Install the optional client dependency with `pip install "corecoder[mcp]"` (or `pip install -e ".[mcp]"` in a checkout), then create `~/.corecoder/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "local-tools": {
+      "command": "python",
+      "args": ["/absolute/path/to/server.py"],
+      "env": {"API_TOKEN": "${MY_MCP_TOKEN}"}
+    },
+    "firecrawl": {
+      "url": "https://mcp.firecrawl.dev/v2/mcp"
+    }
+  }
+}
+```
+
+Only `mcpServers`, `command`, `args`, `env`, and `url` are accepted. Each server chooses exactly one transport: `command` with optional `args` and `env` starts a stdio server directly rather than through a shell; an absolute `http://` or `https://` `url` connects to a Streamable HTTP server. `env` values may reference existing process environment variables with `${NAME}` and apply only to stdio servers. Streamable HTTP configuration currently supports no custom request headers or OAuth. Project files, project `.env` files, and saved sessions never choose which MCP server starts or is contacted.
+
+Use `--mcp-config PATH` for a one-run override or `--no-mcp` to disable MCP for a run. They are mutually exclusive startup options. MCP tools appear as `mcp__<server-key>__<tool-name>` and are fixed when CoreCoder starts. If a server reports a tool-list change, restart CoreCoder to refresh its tool snapshot.
+
+CoreCoder supports MCP Tools over stdio and Streamable HTTP, with text and structured JSON results. It does not support MCP resources, prompts, legacy SSE, custom HTTP transport settings, automatic reconnects, automatic tool-call retries, or image, audio, and resource results. MCP calls can incur third-party service charges; those charges are outside CoreCoder's LLM hard budget.
+
 ## Fallbacks, status and hard budget
 
 Fallback indexes must be consecutive and start at 1. All fields of an enabled fallback are required where the field table says required; the example keeps fallback blocks commented so copying it cannot enable a partial fallback. Each level owns its API key. Keep `.env` untracked and never commit its keys.
@@ -178,7 +203,7 @@ Going deeper, the directions are out in the open too. None of the following is i
 
 - **The dangerous-command blocking in bash is just a regex blacklist.** It guards against slips, not a security sandbox. Facing untrusted input means reaching for seccomp or container isolation. This is the hardest of the four; it goes all the way down to the syscall and isolation layer.
 - **Sub-agents only run the plainest synchronous execution.** Make it async or a streaming executor and you close the exact gap the fifth essay identifies between this and how production agents stream execution.
-- **No MCP, no RAG.** Wire up MCP to give it the external tool ecosystem, or add retrieval-based code location for big repos. Both are real ways to grow from a minimal core into your own stronger agent.
+- **No RAG.** Add retrieval-based code location for big repos as a next step beyond the built-in and MCP tool sets.
 
 The README only points; the seventh essay picks up the code details for each. Pick one and start; that's the whole reason the core is kept this small.
 

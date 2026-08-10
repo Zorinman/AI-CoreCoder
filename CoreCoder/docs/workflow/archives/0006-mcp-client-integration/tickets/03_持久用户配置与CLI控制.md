@@ -4,7 +4,7 @@
 
 **Blocked by**：02 — 打通单个 stdio MCP Server 的完整调用链
 
-**Status**：ready-for-agent
+**Status**：completed
 
 - [ ] CoreCoder 默认从用户级 `~/.corecoder/mcp.json` 加载 MCP Server 配置。
 - [ ] `--mcp-config` 能够为本次启动覆盖默认配置，`--no-mcp` 能够禁用本次启动的 MCP。

@@ -99,3 +99,25 @@
 
 - 自动化测试验证两个默认 Agent 的 Tool、子 Agent 父引用和变更文件记录相互隔离。
 - 自动化测试验证两个后端通过公开 `chat()` 接口产生等价的文本、回调、用量、工具调用和容错结果。
+
+## 4. MCP 客户端工具接入
+
+对应归档 Spec：[docs/workflow/archives/0006-mcp-client-integration/spec.md](workflow/archives/0006-mcp-client-integration/spec.md)
+对应归档 ADR：[docs/workflow/archives/0006-mcp-client-integration/adr.md](workflow/archives/0006-mcp-client-integration/adr.md)
+
+**状态**：已归档（归档日期 2026-08-10）
+
+### 能力
+
+- CoreCoder 作为 MCP Client，在 Agent 启动前发现并注册外部 Server 提供的 Tools。
+- 支持本地 stdio 与远程 Streamable HTTP 两种传输；每个 Server 配置只能选择其中一种。
+- 默认从 `~/.corecoder/mcp.json` 读取用户级配置，也可使用 `--mcp-config PATH` 临时覆盖或以 `--no-mcp` 禁用。
+- 已连接工具使用 `mcp__<server-key>__<tool-name>` 命名，避免多 Server 的同名工具冲突。
+- 交互模式中的 `/mcp` 显示已连接 Server 及其工具数量。
+
+### 运行边界
+
+- 仅接入 Tools；不接入 Resources、Prompts、旧 SSE、自定义请求头、OAuth、自动重试或自动重连。
+- MCP 配置只能由用户显式提供；项目目录、项目 `.env` 和已保存会话不能触发连接。
+- 工具集在启动时固定，MCP 工具串行执行；Server 工具清单变化后需重启 CoreCoder。
+- MCP 服务产生的第三方费用不属于 LLM 硬预算范围。

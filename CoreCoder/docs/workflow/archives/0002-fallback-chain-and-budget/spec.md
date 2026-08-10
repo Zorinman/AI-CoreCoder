@@ -161,4 +161,4 @@ agent 默认共享父 Agent 的预算/熔断状态，但其工具继承规则已
 
 ## 后续决策更新（0006）
 
-原 0003 MCP 方案已废弃，当前 MCP 接入由 [0006 MCP 客户端工具接入](../../specs/0006_specs_mcp-client-integration.md) 取代。子 Agent 仍与父 Agent 共享同一个 `ModelChain`、预算累计和熔断状态；同时，子 Agent 继承父 Agent 的附加工具，包括 MCP 工具，但重新创建自己的内置有状态工具和 Agent 运行状态。本更新不改变本 feature 已归档的预算与降级行为。
+原 0003 MCP 方案已废弃，当前 MCP 接入由 [0006 MCP 客户端工具接入](../0006-mcp-client-integration/spec.md) 取代。子 Agent 仍与父 Agent 共享同一个 `ModelChain`、预算累计和熔断状态；同时，子 Agent 继承父 Agent 的附加工具，包括 MCP 工具，但重新创建自己的内置有状态工具和 Agent 运行状态。本更新不改变本 feature 已归档的预算与降级行为。

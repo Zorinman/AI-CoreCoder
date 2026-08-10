@@ -16,3 +16,6 @@
 ```bash
 corecoder 
 ```
+
+# MCP
+[MCP 配置与使用](MCP使用指南.md)

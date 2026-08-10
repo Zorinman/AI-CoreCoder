@@ -22,6 +22,7 @@ Agent.chat() -> ModelChain.chat() -> 当前 LLM.chat() -> LLMResponse
 | 配置与模型通信   | `Config`、`ModelConfig`、`BudgetState`、`ModelChain`、`ToolCall`、`LLMResponse`、`LLM`、`LiteLLM`         |
 | Agent 运行状态   | `Agent`、`ContextManager`、Agent 运行状态、消息字典、会话 JSON                                            |
 | 工具体系         | `Tool`、`BashTool`、`ReadFileTool`、`WriteFileTool`、`EditFileTool`、`GlobTool`、`GrepTool`、`AgentTool` |
+| MCP 接入         | `McpServerConfig`、`McpStartupReport`、`McpRuntime`、`McpTool`                                      |
 | 模块辅助状态     | `_tool_by_name`、`_PRICING`、危险命令规则、搜索跳过目录和会话目录等                                      |
 
 ## 一、配置与模型通信
@@ -546,6 +547,44 @@ _PRICING = {
 
 `_DANGEROUS_PATTERNS` 也是列表结构，元素形如 `(正则表达式, 风险说明)`；完整规则直接见 [bash.py](../CoreCoder/corecoder/tools/bash.py)。
 
+# MCP 客户端结构
+
+定义位置：[mcp.py](../../corecoder/mcp.py)。MCP 模块把可选的 MCP SDK 限定在自身运行时边界内，普通的 CoreCoder 启动不需要安装或导入该依赖。CoreCoder 仅作为 Client 消费外部 Server 的 Tools。
+
+## 1. 数据结构与职责
+
+| 结构 | 类型 | 关键字段或状态 | 职责 |
+| --- | --- | --- | --- |
+| `McpServerConfig` | 不可变 `@dataclass` | `key`、`command`、`args`、`env`、`url` | 表示已经校验的 stdio 或 Streamable HTTP Server 配置。 |
+| `McpStartupReport` | 不可变 `@dataclass` | `server_key`、`status`、`tool_count`、`error` | 保存单个 Server 的安全启动摘要，供 CLI 显示。 |
+| `McpRuntime` | 类 | `servers`、`tools`、`startup_reports`、后台事件循环、会话组和退出栈 | 管理连接、工具发现、调用、超时和清理。 |
+| `McpTool` | `Tool` 子类 | 运行时引用、Server 键、远程工具名、本地工具名、Schema | 将异步 MCP Tool 适配成 Agent 的同步工具接口。 |
+
+`McpServerConfig` 的 `url` 与 `command` 是互斥的传输入口：`url` 表示 Streamable HTTP；`command`、`args` 和 `env` 表示 stdio。配置解析后的结构不存入全局 `Config`，而由 CLI 在启动阶段直接交给 `McpRuntime`。
+
+## 2. 启动和调用路径
+
+```text
+~/.corecoder/mcp.json 或 --mcp-config PATH
+-> load_mcp_config()
+-> McpServerConfig[]
+-> McpRuntime.start()
+-> 每个 Server 建立会话并发现 Tool
+-> McpTool[]
+-> Agent(extra_tools=McpTool[])
+-> Agent 工具调度
+-> McpTool.execute()
+-> McpRuntime.call_tool()
+```
+
+`McpRuntime` 在后台线程维护 `asyncio` 事件循环，持有所有已建立的会话和 stdio 子进程。`start()` 返回启动时发现的 `McpTool` 快照，`call_tool()` 使用该事件循环发送调用，`close()` 统一释放会话、进程和事件循环。连接超时为 30 秒，工具调用超时为 120 秒。
+
+一个 Server 连接失败会生成失败的 `McpStartupReport`，不会阻止其他 Server 的工具注册；没有任何可用工具时，MCP 启动失败。发现的工具使用 `mcp__<server-key>__<tool-name>` 命名，按 Server 键隔离同名工具。`McpTool.concurrency_safe = False`，因此它们由 Agent 串行执行。
+
+## 3. CLI 对接
+
+`cli.py` 的 `_start_mcp()` 在构造 `Agent` 前运行。默认只检查用户主目录下的 `~/.corecoder/mcp.json`；项目目录、项目 `.env` 和保存的会话都不会触发 MCP 连接。MCP Runtime 的所有权属于本次 CLI 进程，并由 `main()` 的 `finally` 块关闭。
+
 # CoreCoder 命令行接口
 
 命令行接口分为启动参数和交互内置命令两部分。两者均由 [cli.py](../CoreCoder/corecoder/cli.py) 实现，但处理时机和职责不同。
@@ -561,6 +600,8 @@ _PRICING = {
 | `--api-key` | 指定主模型 API Key | 在构造 `Config.primary` 前覆盖 `CORECODER_PRIMARY_API_KEY`。 |
 | `-p`, `--prompt` | 提供单次提示词 | 调用一次 `Agent.chat()` 后退出，不进入交互 REPL。 |
 | `-r`, `--resume ID` | 恢复已保存会话 | 加载 `messages` 和显式运行时模型覆盖；指定 `--model` 时优先使用该参数。 |
+| `--mcp-config PATH` | 为本次启动指定 MCP 配置文件 | 覆盖默认 `~/.corecoder/mcp.json`；与 `--no-mcp` 互斥。 |
+| `--no-mcp` | 禁用本次启动的 MCP | 跳过 MCP 配置发现和外部 Server 连接；与 `--mcp-config` 互斥。 |
 | `-v`, `--version` | 显示版本 | 由 `argparse` 输出版本并结束程序。 |
 
 例如，`corecoder --model gpt-5.4 --resume session_123` 在启动时设置模型并恢复会话。
@@ -572,6 +613,7 @@ _PRICING = {
 | 输入 | 作用 |
 | --- | --- |
 | `/help` | 显示交互命令和输入快捷键。 |
+| `/mcp` | 显示当前已连接的 MCP Server 及每个 Server 的工具数量。 |
 | `/reset` | 清空当前对话历史。 |
 | `/model` | 显示当前模型。 |
 | `/model <name>` | 在当前进程中切换模型。 |

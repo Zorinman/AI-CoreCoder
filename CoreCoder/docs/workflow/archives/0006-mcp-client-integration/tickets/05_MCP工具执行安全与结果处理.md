@@ -4,7 +4,7 @@
 
 **Blocked by**：02 — 打通单个 stdio MCP Server 的完整调用链
 
-**Status**：ready-for-agent
+**Status**：completed
 
 - [ ] 所有 MCP 工具保持不可并发，Server annotations 不改变调度策略。
 - [ ] MCP 工具调用失败后不自动重试，Server 失效后不自动重连。

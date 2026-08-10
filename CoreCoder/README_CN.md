@@ -80,6 +80,31 @@ corecoder                                  # 交互式 REPL
 corecoder -p "给 parse_config() 加错误处理"   # 一次性模式，干完就退
 ```
 
+## MCP 工具
+
+CoreCoder 可使用本地 MCP stdio Server 和远程 Streamable HTTP Server 提供的工具。先安装可选依赖：`pip install "corecoder[mcp]"`；在源码目录中可使用 `pip install -e ".[mcp]"`。然后创建 `~/.corecoder/mcp.json`：
+
+```json
+{
+  "mcpServers": {
+    "local-tools": {
+      "command": "python",
+      "args": ["/absolute/path/to/server.py"],
+      "env": {"API_TOKEN": "${MY_MCP_TOKEN}"}
+    },
+    "firecrawl": {
+      "url": "https://mcp.firecrawl.dev/v2/mcp"
+    }
+  }
+}
+```
+
+配置仅接受 `mcpServers`、`command`、`args`、`env` 和 `url`。每个 Server 必须且只能选择一种传输：`command` 及可选的 `args`、`env` 会直接启动 stdio Server，不经过 Shell；绝对 `http://` 或 `https://` `url` 会连接 Streamable HTTP Server。`env` 的值可用 `${NAME}` 引用已有进程环境变量，且仅适用于 stdio Server。Streamable HTTP 当前不支持自定义请求头或 OAuth。项目文件、项目 `.env` 和保存的会话均不能决定启动或连接哪些 MCP Server。
+
+使用 `--mcp-config PATH` 临时覆盖本次配置，或使用 `--no-mcp` 禁用本次 MCP；两者是互斥的启动参数。MCP 工具的名称为 `mcp__<server-key>__<tool-name>`，并在启动时固定。Server 通知工具列表变化后，需要重启 CoreCoder 才会刷新工具快照。
+
+CoreCoder 支持 stdio 和 Streamable HTTP transport 上的 MCP Tools，以及文本和结构化 JSON 结果。不支持 Resources、Prompts、旧 SSE、自定义 HTTP transport 设置、自动重连、自动重试，以及图片、音频和资源类结果。MCP 调用可能产生第三方服务费用，且该费用不受 CoreCoder 的 LLM 硬预算保护。
+
 ## 降级链、状态与硬预算
 
 备用索引必须从 1 开始连续编号。启用的备用级别必须填写表中要求的字段；示例文件将备用块默认注释，因此复制模板不会意外启用不完整的备用模型。每一级都拥有自己的 API Key。应保持 `.env` 不被 Git 跟踪，且绝不提交其中的密钥。
@@ -178,7 +203,7 @@ print(Agent(llm=llm).chat("找出项目里所有 TODO 注释并列出来"))
 
 - **bash 的危险命令拦截只是正则黑名单。** 防手滑，不是安全沙箱。要面对不可信输入，就得上 seccomp 或容器隔离。这条最硬，要一路走到系统调用和隔离那一层。
 - **子 agent 只有最朴素的同步执行。** 做成异步或流式执行器，正好补上第五篇点名的、相对生产级 agent 流式执行的那段差距。
-- **不做 MCP，不做 RAG。** 接上 MCP 让它用上外部工具生态，或给大仓加检索式的代码定位，都是从「最小核心」往「你自己的更强 agent」扩的真实方向。
+- **不做 RAG。** 可以为大仓库加入检索式代码定位，作为内置工具和 MCP 工具之外的下一步能力。
 
 README 只给方向，每条的代码细节第七篇接着讲。挑一个动手，就是把它做得更好的开始。
 

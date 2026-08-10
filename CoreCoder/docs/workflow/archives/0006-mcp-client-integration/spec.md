@@ -1,7 +1,9 @@
 ---
 title: MCP 客户端工具接入
-status: ready-for-agent
+status: archived
 feature_id: 0006
+implemented_in: working-tree
+archived_on: 2026-08-10
 depends_on:
   - 0001-concurrency-scheduling
   - 0002-fallback-chain-and-budget
@@ -20,7 +22,7 @@ MCP Server 配置还具有执行权限。若自动读取项目目录或项目 `.
 
 ## 解决方案
 
-CoreCoder 第一阶段仅作为 MCP Client，通过官方 Python SDK v2 连接 stdio Server，并只消费 Tools。用户在固定的用户级配置文件中一次性声明 `mcpServers`；CoreCoder 后续启动、新对话和恢复会话时自动使用该配置。CLI 可以临时覆盖配置或禁用 MCP，项目目录和项目 `.env` 不参与 MCP Server 启动授权。
+CoreCoder 作为 MCP Client，通过官方 Python SDK v2 连接 stdio 或 Streamable HTTP Server，并只消费 Tools。用户在固定的用户级配置文件中一次性声明 `mcpServers`；CoreCoder 后续启动、新对话和恢复会话时自动使用该配置。CLI 可以临时覆盖配置或禁用 MCP，项目目录和项目 `.env` 不参与 MCP Server 启动或远程端点连接授权。
 
 独立的 `McpRuntime` 负责 MCP 配置解析、Server 连接、后台事件循环、多 Server 会话、工具发现、调用转发、通知接收和关闭清理。每个远程工具由 `McpTool` adapter 适配为现有同步 `Tool` interface，Agent 不直接依赖 MCP SDK，也不改为异步实现。
 
@@ -37,7 +39,7 @@ Agent 的 `tools=` 保持完整替换语义，新增 `extra_tools=` 追加外部
 5. 作为用户，我希望通过 `--no-mcp` 临时禁用自动连接，以便在诊断或受限环境中运行 CoreCoder。
 6. 作为用户，我希望 `corecoder --help` 展示 MCP 启动参数，以便在启动前发现配置方法。
 7. 作为 REPL 用户，我希望 `/help` 在启动参数区域展示 MCP 配置和禁用选项，以便在交互过程中查阅用法。
-8. 作为已有 MCP 配置的用户，我希望配置采用常见的 `mcpServers` 结构，以便复用现有 stdio Server 定义。
+8. 作为已有 MCP 配置的用户，我希望配置采用常见的 `mcpServers` 结构，以便复用现有 stdio 和 Streamable HTTP Server 定义。
 9. 作为用户，我希望配置中的环境变量既能使用普通值，也能引用已有系统环境变量，以便把凭据保留在配置文件之外。
 10. 作为用户，我希望缺失的环境变量引用在启动时明确报错，以免 Server 带着不完整配置运行。
 11. 作为用户，我希望 MCP Server 继承 CoreCoder 的当前工作目录，以便 Server 与 coding agent 操作同一工作区。
@@ -78,23 +80,27 @@ Agent 的 `tools=` 保持完整替换语义，新增 `extra_tools=` 追加外部
 46. 作为用户，我希望 MCP 工具自身的外部费用边界被明确说明，以免误认为它们受 LLM 硬预算保护。
 47. 作为维护者，我希望测试无需访问互联网即可验证 MCP 的主要行为，以便测试稳定且可重复。
 48. 作为维护者，我希望至少有一个本地 stdio 集成测试验证真实进程生命周期，以免假 adapter 掩盖协议接线错误。
+49. 作为用户，我希望在 `mcpServers` 中以 URL 声明一个远程 Streamable HTTP Server，以便使用 Firecrawl 等远程 MCP 服务。
+50. 作为维护者，我希望一个 Server 配置只能选择 stdio 或 Streamable HTTP，以免命令执行和远程连接语义混杂。
+51. 作为维护者，我希望本地 Streamable HTTP 集成测试完成工具调用，以便在不访问互联网的情况下验证远程传输接线。
 
 ## 实现决策
 
 - CoreCoder 仅实现 MCP Client，不实现 MCP Server。
-- 第一阶段仅支持 Tools 和 stdio transport，不支持其他 MCP 能力或 transport。
+- 仅支持 Tools，并支持 stdio 和 Streamable HTTP transport；不支持其他 MCP 能力、旧 SSE 或自定义 transport。
 - 官方 Python SDK 作为 `corecoder[mcp]` 可选依赖引入，版本范围为 `mcp>=2,<3`；未启用 MCP 时不得导入或要求该依赖。
 - 默认用户级 MCP Server 配置位于 `~/.corecoder/mcp.json`。CLI 的 `--mcp-config` 优先于默认文件，`--no-mcp` 禁用本次启动的 MCP；两者同时出现时配置无效。
 - 项目目录和项目 `.env` 不作为 MCP 配置来源。会话文件不保存 MCP 配置路径、Server 定义或凭据。
 - `corecoder --help` 和 REPL `/help` 均展示 `--mcp-config` 与 `--no-mcp`，并明确它们是启动参数。
-- 配置根对象只接受 `mcpServers`。每个 Server 只接受必填字符串 `command`、可选字符串数组 `args` 和可选字符串映射 `env`；未知字段、错误类型、空命令和缺失环境变量引用均在启动时失败。
-- `env` 值允许普通字符串和 `${VARIABLE}` 引用。Server 环境以当前进程环境为基础，再由解析后的 `env` 覆盖；敏感值不得出现在启动摘要或会话文件中。
+- 配置根对象只接受 `mcpServers`。每个 Server 必须二选一：stdio 配置只接受必填字符串 `command`、可选字符串数组 `args` 和可选字符串映射 `env`；Streamable HTTP 配置只接受必填的 `http://` 或 `https://` URL 字符串 `url`。`url` 不得与 `command`、`args` 或 `env` 同时出现；未知字段、错误类型、空命令、无效 URL 和缺失环境变量引用均在启动时失败。
+- `env` 仅适用于 stdio。其值允许普通字符串和 `${VARIABLE}` 引用；Server 环境以当前进程环境为基础，再由解析后的 `env` 覆盖。敏感值不得出现在启动摘要或会话文件中。
 - stdio Server 使用可执行文件和参数直接启动，不通过 Shell，并继承 CoreCoder 启动时的当前工作目录。
-- `McpRuntime` 是所有 MCP 会话、后台事件循环、Server 子进程、通知和关闭行为的唯一生命周期所有者。它使用一个后台事件循环和一个 `ClientSessionGroup` 管理全部 Server。
+- Streamable HTTP Server 使用 MCP SDK 的 `streamable_http_client(url)` 建立会话；本期不支持请求头、OAuth 或其他 HTTP 客户端自定义。
+- `McpRuntime` 是所有 MCP 会话、后台事件循环、stdio Server 子进程、通知和关闭行为的唯一生命周期所有者。它使用一个后台事件循环和一个 `ClientSessionGroup` 管理全部 Server。
 - CLI 在 Agent 构造前建立 `McpRuntime`、连接 Server、获取工具并形成 MCP 工具快照，在 CLI 退出的统一清理路径中关闭 Runtime。
 - Server 连接超时为 30 秒，工具调用超时为 120 秒。第一阶段不提供 per-Server 超时配置。
 - MCP 工具调用不自动重试；Server 进程退出或连接失效后不自动重连，相关工具返回明确的不可用错误，用户通过重启 CoreCoder 恢复。
-- 正常退出和中断均触发关闭。Runtime 最多等待 5 秒完成优雅关闭，随后终止残留 stdio 子进程。
+- 正常退出和中断均触发关闭。Runtime 最多等待 5 秒完成优雅关闭，随后终止残留 stdio 子进程；Streamable HTTP 会话由 SDK 正常关闭。
 - 无效配置使启动失败。单个 Server 连接、初始化、工具 Schema 或名称验证失败时，该 Server 被标记失败，其他 Server 继续；全部 Server 失败或最终没有任何可用 MCP 工具时启动失败。
 - 启动摘要只显示 Server 配置键、连接结果、错误摘要和工具数量，不显示 `command`、`args`、`env` 或凭据。
 - MCP 工具的模型可见名称为 `mcp__<server配置键>__<工具原名>`。名称只允许 ASCII 字母、数字、下划线和连字符，最长 64 字符；规范化后发生冲突或超过限制时，对应 Server 失败，不截断或静默覆盖。
@@ -122,6 +128,7 @@ Agent 的 `tools=` 保持完整替换语义，新增 `extra_tools=` 追加外部
 - `McpTool` 测试覆盖名称生成、输入 Schema 复用、文本与结构化结果、执行错误、不支持内容类型、参数摘要脱敏和输出截断。
 - 并发测试通过 Agent interface 验证 MCP 工具始终进入串行段，Server annotations 不改变调度。
 - 增加一个不访问互联网的最小本地 stdio Server 集成测试，验证真实进程启动、初始化、工具列表、工具调用、列表变化通知和关闭清理。
+- 增加一个不访问互联网的本地 Streamable HTTP Server 集成测试，验证 URL 配置、会话初始化、工具发现和工具调用。
 - 连接失败测试只使用本地失败进程或假 adapter，不依赖真实第三方 Server。
 - 复用现有假模块注入、直接构造 Agent、CLI 输出捕获和工具调度测试模式，不引入新的测试框架。
 
@@ -129,7 +136,8 @@ Agent 的 `tools=` 保持完整替换语义，新增 `extra_tools=` 追加外部
 
 - 将 CoreCoder 暴露为 MCP Server。
 - Resources、Prompts、Roots、Sampling、Elicitation、Tasks 或其他非 Tools 能力。
-- Streamable HTTP、旧 SSE 和自定义 transport。
+- 旧 SSE 和自定义 transport。
+- Streamable HTTP 的自定义请求头、OAuth 或其他 HTTP 客户端配置。
 - 运行期间动态刷新 Agent 工具集合。
 - 自动重试、自动重连和逐次工具调用审批。
 - 根据 Server annotations 或用户配置覆盖 MCP 工具并发属性。

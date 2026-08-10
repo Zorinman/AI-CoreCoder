@@ -4,7 +4,7 @@
 
 **Blocked by**：01 — 建立 Agent 工具组合与继承 seam
 
-**Status**：ready-for-agent
+**Status**：completed
 
 - [ ] 官方 MCP Python SDK 作为可选依赖使用，未启用 MCP 时基础 CoreCoder 不要求安装该依赖。
 - [ ] 严格解析一个包含 `mcpServers` 的 stdio 配置，支持 `command`、`args` 和 `env`。

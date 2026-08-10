@@ -4,7 +4,7 @@
 
 **Blocked by**：02 — 打通单个 stdio MCP Server 的完整调用链
 
-**Status**：ready-for-agent
+**Status**：completed
 
 - [ ] 一个 MCP 生命周期所有者通过单个多会话聚合能力管理全部配置 Server。
 - [ ] 每个模型可见工具名使用 `mcp__<server配置键>__<工具原名>` 形成稳定命名空间。

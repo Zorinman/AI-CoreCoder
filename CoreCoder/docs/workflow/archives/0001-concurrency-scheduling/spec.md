@@ -114,4 +114,4 @@ Agent 执行一批 tool_calls 时，按模型给出的原始顺序做"分段"：
 
 ## 后续决策更新（0006）
 
-原 0003 MCP 方案已废弃，当前 MCP 接入由 [0006 MCP 客户端工具接入](../../specs/0006_specs_mcp-client-integration.md) 取代。0006 继续复用本归档确立的默认拒绝规则：所有 MCP 工具均保持不可并发，且不采信 Server annotations 放宽并发限制。本更新只修正后续功能引用，不改变本 feature 已归档的调度行为。
+原 0003 MCP 方案已废弃，当前 MCP 接入由 [0006 MCP 客户端工具接入](../0006-mcp-client-integration/spec.md) 取代。0006 继续复用本归档确立的默认拒绝规则：所有 MCP 工具均保持不可并发，且不采信 Server annotations 放宽并发限制。本更新只修正后续功能引用，不改变本 feature 已归档的调度行为。

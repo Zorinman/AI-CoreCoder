@@ -46,8 +46,12 @@ _Avoid_: MCP 工具原名、server 自报工具名
 Agent 启动时从所有成功连接的 MCP server 获取并固定下来的工具集合。运行期间不动态修改该集合；收到工具列表变化通知时，当前快照视为过期，并提示用户重启 CoreCoder。
 
 **MCP Server 配置（MCP server configuration）**：
-用户拥有的 `mcpServers` 配置文件，默认位置为 `~/.corecoder/mcp.json`，表示用户授权 CoreCoder 启动其中声明的 stdio server。CLI 可以临时覆盖或禁用该配置；项目目录及其 `.env` 不会决定启动哪些 MCP server。
+用户拥有的 `mcpServers` 配置文件，默认位置为 `~/.corecoder/mcp.json`，表示用户授权 CoreCoder 启动其中声明的 stdio server 或连接其中声明的 Streamable HTTP server。CLI 可以临时覆盖或禁用该配置；项目目录及其 `.env` 不会决定启动哪些 MCP server。
 _Avoid_: 工作区自动配置、MCP Server 注册表
+
+**MCP 传输（MCP transport）**：
+MCP server 配置选择的连接方式。`command` 配置启动本地 stdio server；`url` 配置连接远程 Streamable HTTP server。每个配置只能选择一种传输。
+_Avoid_: HTTP MCP 协议、远程 MCP 协议
 
 **Agent 运行状态（Agent runtime state）**：
 由单个 `Agent` 持有的当前工作目录和已变更文件集合。该状态在该 Agent 的多次对话之间持续，但不与其他 Agent 共享。
