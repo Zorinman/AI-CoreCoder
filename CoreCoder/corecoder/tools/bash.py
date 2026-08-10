@@ -10,6 +10,7 @@ Claude Code's BashTool is 1,143 lines. This is the distilled version:
 import os
 import re
 import subprocess
+from typing import ClassVar
 
 from .base import Tool
 from .runtime import ToolRuntimeState
@@ -38,7 +39,7 @@ class BashTool(Tool):
         "Execute a shell command. Returns stdout, stderr, and exit code. "
         "Use this for running tests, installing packages, git operations, etc."
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "command": {
@@ -74,6 +75,7 @@ class BashTool(Tool):
                 errors="replace",
                 timeout=timeout,
                 cwd=cwd,
+                check=False,
             )
 
             # track cd commands so next command runs in the right place
@@ -94,7 +96,7 @@ class BashTool(Tool):
             return out.strip() or "(no output)"
         except subprocess.TimeoutExpired:
             return f"Error: timed out after {timeout}s"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - tool boundaries return filesystem and process failures.
             return f"Error running command: {e}"
 
     def _update_cwd(self, command: str, current_cwd: str) -> None:

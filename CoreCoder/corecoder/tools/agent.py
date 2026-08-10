@@ -8,7 +8,7 @@ its own context window.
 The sub-agent runs to completion and returns a text summary.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from .base import Tool
 
@@ -24,7 +24,7 @@ class AgentTool(Tool):
         "researching a codebase, implementing a multi-step change in isolation, "
         "or any task that would benefit from a fresh context window."
     )
-    parameters = {
+    parameters: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "task": {
@@ -48,9 +48,10 @@ class AgentTool(Tool):
         parent = self._parent_agent
         sub = Agent(
             llm=parent.llm,
-            tools=[t for t in parent.tools if t.name != "agent"],  # no recursive agents
+            extra_tools=parent.extra_tools,
             max_context_tokens=parent.context.max_tokens,
             max_rounds=20,
+            _include_agent_tool=False,
         )
 
         try:
@@ -59,5 +60,5 @@ class AgentTool(Tool):
             if len(result) > 5000:
                 result = result[:4500] + "\n... (sub-agent output truncated)"
             return f"[Sub-agent completed]\n{result}"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - report sub-agent failures to the parent agent.
             return f"Sub-agent error: {e}"

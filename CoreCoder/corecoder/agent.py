@@ -11,6 +11,7 @@ which means it's done working and ready to report back.
 
 import concurrent.futures
 import inspect
+import json
 
 from .context import ContextManager
 from .fallback import BudgetExceededError, ModelChain
@@ -32,19 +33,33 @@ class Agent:
         self,
         llm: LLM | ModelChain,
         tools: list[Tool] | None = None,
+        extra_tools: list[Tool] | None = None,
         max_context_tokens: int = 128_000,
         max_rounds: int = 50,
         model_chain: ModelChain | None = None,
+        _include_agent_tool: bool = True,
     ):
         self.llm = model_chain if model_chain is not None else llm
         self.model_chain = self.llm if isinstance(self.llm, ModelChain) else model_chain
         self._runtime_state = ToolRuntimeState()
-        self.tools = tools if tools is not None else self._create_default_tools()
+        self.extra_tools = list(extra_tools or [])
+        base_tools = tools if tools is not None else self._create_default_tools()
+        if not _include_agent_tool:
+            base_tools = [tool for tool in base_tools if tool.name != "agent"]
+        self.tools = [*base_tools, *self.extra_tools]
+        self._validate_tool_names()
         self._tool_by_name = {t.name: t for t in self.tools}
         self.messages: list[dict] = []
         self.context = ContextManager(max_tokens=max_context_tokens)
         self.max_rounds = max_rounds
         self._system = system_prompt(self.tools)
+        self.startup_context_tokens = self._estimate_startup_context_tokens()
+        if self.startup_context_tokens > max_context_tokens:
+            raise ValueError(
+                f"System prompt and tool schemas require {self.startup_context_tokens} tokens, "
+                f"exceeding the {max_context_tokens}-token context window."
+            )
+        self.startup_context_warning = self.startup_context_tokens > max_context_tokens * 0.25
 
         # wire up sub-agent capability
         for t in self.tools:
@@ -62,6 +77,17 @@ class Agent:
             GrepTool(),
             AgentTool(),
         ]
+
+    def _validate_tool_names(self) -> None:
+        names = [tool.name for tool in self.tools]
+        duplicate_names = sorted({name for name in names if names.count(name) > 1})
+        if duplicate_names:
+            joined_names = ", ".join(duplicate_names)
+            raise ValueError(f"Tool names must be unique; duplicates: {joined_names}")
+
+    def _estimate_startup_context_tokens(self) -> int:
+        schema_json = json.dumps(self._tool_schemas(), ensure_ascii=False, sort_keys=True)
+        return (len(self._system) + len(schema_json)) // 3
 
     @property
     def changed_files(self) -> frozenset[str]:
@@ -153,7 +179,7 @@ class Agent:
             return f"Error: bad arguments for {tc.name}: {e}"
         try:
             return tool.execute(**tc.arguments)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - tool boundaries return execution failures to the model.
             return f"Error executing {tc.name}: {e}"
 
     def _tool_is_safe(self, tc) -> bool:

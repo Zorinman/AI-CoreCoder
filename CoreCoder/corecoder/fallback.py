@@ -7,7 +7,8 @@ module only decides which model should receive the next request.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
 from .budget import BudgetState
 from .config import ModelConfig
@@ -63,11 +64,11 @@ class ModelChain:
     @classmethod
     def from_config(
         cls,
-        config: "Config",
+        config: Config,
         *,
         budget: BudgetState | None = None,
         llm_factory: Callable[[ModelConfig], Any] | None = None,
-    ) -> "ModelChain":
+    ) -> ModelChain:
         """Create every production model through one resolved configuration path."""
         return cls(
             primary=config.primary,
@@ -198,7 +199,7 @@ class ModelChain:
                 result = self._invoke(model, *args, **kwargs)
                 self._active_index = index
                 return result
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - model implementations expose heterogeneous errors.
                 self._last_failure = f"level {index}: {type(exc).__name__}"
                 errors.append(exc)
         detail = "; ".join(f"{type(e).__name__}: {e}" for e in errors)
@@ -215,7 +216,7 @@ class ModelChain:
         for _ in range(3):
             try:
                 return model.chat(*args, **kwargs)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - test doubles and providers may raise arbitrary errors.
                 last = exc
         if last is not None:
             raise last

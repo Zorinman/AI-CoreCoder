@@ -1,14 +1,14 @@
 """Configuration schema, construction and redaction contracts."""
 
-from dataclasses import FrozenInstanceError
 import os
 import sys
+from dataclasses import FrozenInstanceError
 
 import pytest
 
+from corecoder import session as session_module
 from corecoder.config import Config, ConfigError, ModelConfig
 from corecoder.fallback import ModelChain
-from corecoder import session as session_module
 from corecoder.session import load_session, save_session
 
 

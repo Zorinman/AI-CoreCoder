@@ -5,11 +5,10 @@ from __future__ import annotations
 import math
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 from urllib.parse import urlsplit, urlunsplit
-
 
 _MODEL_FIELDS = frozenset({
     "MODEL",
@@ -98,7 +97,7 @@ class Config:
             _validate_non_negative_number(self.max_cost_usd, "max_cost_usd")
 
     @classmethod
-    def from_env(cls, primary_overrides: Mapping[str, str | None] | None = None) -> "Config":
+    def from_env(cls, primary_overrides: Mapping[str, str | None] | None = None) -> Config:
         """Resolve the canonical environment schema into an immutable snapshot."""
         _load_dotenv()
         _validate_environment_names()
@@ -235,10 +234,7 @@ def _positive_int_from_value(name: str, value: str | None) -> int:
         parsed = int(value or "")
     except ValueError as exc:
         raise ConfigError(f"{name} must be a positive integer.") from exc
-    try:
-        _validate_positive_int(parsed, name)
-    except ConfigError:
-        raise
+    _validate_positive_int(parsed, name)
     return parsed
 
 

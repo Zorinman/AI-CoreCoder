@@ -1,4 +1,5 @@
 """Tests for core modules: config, context, session, imports."""
+# ruff: noqa: RUF012
 
 import os
 
@@ -322,6 +323,7 @@ def test_safe_tool_calls_run_concurrently():
     """A run of concurrency-safe calls must overlap in wall-clock time."""
     import threading
     import time
+
     from corecoder.tools.base import Tool
 
     start_gate = threading.Barrier(3, timeout=5)
@@ -356,6 +358,7 @@ def test_safe_tool_calls_run_concurrently():
 def test_unsafe_tool_calls_run_serially_without_overlap():
     """Consecutive unsafe calls must never be in flight at the same time."""
     import threading
+
     from corecoder.tools.base import Tool
 
     active = {"count": 0, "max_seen": 0}

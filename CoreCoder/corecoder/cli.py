@@ -1,23 +1,26 @@
 """Interactive REPL - the user-facing terminal interface."""
 
-import sys
-import os
 import argparse
+import os
+import sys
+from pathlib import Path
 
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.panel import Panel
 from prompt_toolkit import prompt as pt_prompt
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
 
+from . import __version__
 from .agent import Agent
 from .config import Config, ConfigError
 from .fallback import ModelChain
-from .session import save_session, load_session, list_sessions
-from . import __version__
+from .mcp import McpError, McpRuntime, load_mcp_config
+from .session import list_sessions, load_session, save_session
 
 console = Console()
+_SENSITIVE_ARGUMENT_FIELDS = ("key", "token", "secret", "password", "auth", "credential")
 
 
 def _parse_args():
@@ -30,6 +33,17 @@ def _parse_args():
     p.add_argument("--api-key", help="Primary API key (overrides $CORECODER_PRIMARY_API_KEY)")
     p.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive mode)")
     p.add_argument("-r", "--resume", metavar="ID", help="Resume a saved session")
+    mcp_options = p.add_mutually_exclusive_group()
+    mcp_options.add_argument(
+        "--mcp-config",
+        metavar="PATH",
+        help="Startup option: override ~/.corecoder/mcp.json for this run",
+    )
+    mcp_options.add_argument(
+        "--no-mcp",
+        action="store_true",
+        help="Startup option: disable MCP for this run",
+    )
     p.add_argument("-v", "--version", action="version", version=f"ZorinHelper {__version__}")
     return p.parse_args()
 
@@ -47,30 +61,86 @@ def main():
         sys.exit(2)
 
     chain = ModelChain.from_config(config)
-    agent = Agent(llm=chain, max_context_tokens=config.max_context_tokens)
+    runtime = None
+    try:
+        runtime, mcp_tools = _start_mcp(args)
+    except McpError as exc:
+        console.print(f"[red]MCP startup failed: {exc}[/red]")
+        sys.exit(2)
+
     model_override: str | None = None
+    try:
+        if runtime is not None:
+            for line in _mcp_startup_summary(runtime):
+                console.print(line)
+        agent = Agent(llm=chain, max_context_tokens=config.max_context_tokens, extra_tools=mcp_tools)
+        if agent.startup_context_warning:
+            console.print(
+                f"[yellow]System prompt and tools use about {agent.startup_context_tokens} tokens "
+                f"({agent.startup_context_tokens / config.max_context_tokens:.0%} of the context window).[/yellow]"
+            )
+        # resume saved session
+        if args.resume:
+            loaded = load_session(args.resume)
+            if loaded:
+                agent.messages, saved_override = loaded
+                # restore the model from the saved session unless overridden by CLI
+                if saved_override and not args.model:
+                    agent.switch_model(saved_override)
+                    model_override = saved_override
+                console.print(f"[green]Resumed session: {args.resume} (model: {agent.llm.model})[/green]")
+                if not mcp_tools and _history_uses_mcp(agent.messages):
+                    console.print("[yellow]This session used MCP tools, but MCP is not enabled for this run.[/yellow]")
+            else:
+                console.print(f"[red]Session '{args.resume}' not found.[/red]")
+                sys.exit(1)
 
-    # resume saved session
-    if args.resume:
-        loaded = load_session(args.resume)
-        if loaded:
-            agent.messages, saved_override = loaded
-            # restore the model from the saved session unless overridden by CLI
-            if saved_override and not args.model:
-                agent.switch_model(saved_override)
-                model_override = saved_override
-            console.print(f"[green]Resumed session: {args.resume} (model: {agent.llm.model})[/green]")
-        else:
-            console.print(f"[red]Session '{args.resume}' not found.[/red]")
-            sys.exit(1)
+        # one-shot mode
+        if args.prompt:
+            _run_once(agent, args.prompt)
+            return
 
-    # one-shot mode
-    if args.prompt:
-        _run_once(agent, args.prompt)
-        return
+        # interactive REPL
+        _repl(agent, config, model_override, runtime)
+    finally:
+        if runtime is not None:
+            runtime.close()
 
-    # interactive REPL
-    _repl(agent, config, model_override)
+
+def _start_mcp(args) -> tuple[McpRuntime | None, list]:
+    """Create MCP tools from the authorized user-level configuration source."""
+    if args.no_mcp:
+        return None, []
+
+    path = Path(args.mcp_config).expanduser() if args.mcp_config else Path.home() / ".corecoder" / "mcp.json"
+    if not path.is_file():
+        if args.mcp_config:
+            raise McpError(f"MCP configuration file not found: {path}")
+        return None, []
+
+    servers = load_mcp_config(path)
+    runtime = McpRuntime(servers)
+    return runtime, runtime.start()
+
+
+def _history_uses_mcp(messages: list[dict]) -> bool:
+    for message in messages:
+        for call in message.get("tool_calls", []):
+            name = call.get("function", {}).get("name", "")
+            if name.startswith("mcp__"):
+                return True
+    return False
+
+
+def _mcp_startup_summary(runtime: McpRuntime) -> list[str]:
+    """Format the display-safe MCP connection reports for the terminal."""
+    lines = []
+    for report in runtime.startup_reports:
+        line = f"MCP {report.server_key}: {report.status} ({report.tool_count} tools)"
+        if report.error:
+            line += f" — {report.error}"
+        lines.append(line)
+    return lines
 
 
 def _run_once(agent: Agent, prompt: str):
@@ -86,13 +156,18 @@ def _run_once(agent: Agent, prompt: str):
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
         sys.exit(130)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - show one-shot failures without a traceback.
         console.print(f"\n[red]Error: {e}[/red]")
         sys.exit(1)
     print()
 
 
-def _repl(agent: Agent, config: Config, model_override: str | None = None):
+def _repl(
+    agent: Agent,
+    config: Config,
+    model_override: str | None = None,
+    mcp_runtime: McpRuntime | None = None,
+):
     """Interactive read-eval-print loop."""
     console.print(Panel(
         f"[bold]ZorinHelper[/bold] v{__version__}\n"
@@ -116,6 +191,10 @@ def _repl(agent: Agent, config: Config, model_override: str | None = None):
         event.current_buffer.insert_text("\n")
 
     while True:
+        if mcp_runtime is not None:
+            notice = mcp_runtime.consume_tool_snapshot_notice()
+            if notice:
+                console.print(f"[yellow]{notice}[/yellow]")
         try:
             user_input = pt_prompt(
                 "You > ",
@@ -136,6 +215,9 @@ def _repl(agent: Agent, config: Config, model_override: str | None = None):
             break
         if user_input == "/help":
             _show_help()
+            continue
+        if user_input == "/mcp":
+            _show_mcp_status(mcp_runtime)
             continue
         if user_input == "/reset":
             agent.reset()
@@ -216,7 +298,7 @@ def _repl(agent: Agent, config: Config, model_override: str | None = None):
         # call the agent
         streamed: list[str] = []
 
-        def on_token(tok):
+        def on_token(tok, streamed=streamed):
             streamed.append(tok)
             print(tok, end="", flush=True)
 
@@ -235,7 +317,7 @@ def _repl(agent: Agent, config: Config, model_override: str | None = None):
                 console.print(Markdown(response))
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - keep the REPL alive after a request failure.
             console.print(f"\n[red]Error: {e}[/red]")
 
 
@@ -243,6 +325,7 @@ def _show_help():
     console.print(Panel(
         "[bold]Commands:[/bold]\n"
         "  /help          Show this help\n"
+        "  /mcp           Show connected MCP servers\n"
         "  /reset         Clear conversation history\n"
         "  /model         Show current model\n"
         "  /model <name>  Switch model mid-conversation\n"
@@ -255,12 +338,31 @@ def _show_help():
         "  /sessions      List saved sessions\n"
         "  quit           Exit ZorinHelper\n"
         "\n"
+        "[bold]MCP startup options:[/bold]\n"
+        "  --mcp-config PATH  Use a config file for this launch\n"
+        "  --no-mcp           Disable MCP for this launch\n"
+        "\n"
         "[bold]Input:[/bold]\n"
         "  Enter          Submit message\n"
         "  Esc+Enter      Insert newline (for pasting code)",
         title="ZorinHelper Help",
         border_style="dim",
     ))
+
+
+def _show_mcp_status(mcp_runtime: McpRuntime | None) -> None:
+    """Show connected MCP Servers and their discovered tool counts."""
+    if mcp_runtime is None:
+        console.print("[dim]MCP is not enabled for this run.[/dim]")
+        return
+
+    connected_reports = [report for report in mcp_runtime.startup_reports if report.status == "connected"]
+    if not connected_reports:
+        console.print("[dim]No MCP Server is connected.[/dim]")
+        return
+
+    for report in connected_reports:
+        console.print(f"MCP {report.server_key}: connected ({report.tool_count} tools)")
 
 
 def _startup_model_summary(config: Config) -> str:
@@ -277,5 +379,20 @@ def _startup_model_line(label: str, model: str, base_url: str | None) -> str:
 
 
 def _brief(kwargs: dict, maxlen: int = 80) -> str:
-    s = ", ".join(f"{k}={repr(v)[:40]}" for k, v in kwargs.items())
+    redacted = _redact_arguments(kwargs)
+    s = ", ".join(f"{key}={repr(value)[:40]}" for key, value in redacted.items())
     return s[:maxlen] + ("..." if len(s) > maxlen else "")
+
+
+def _redact_arguments(value):
+    if isinstance(value, dict):
+        return {
+            key: "***" if any(field in str(key).lower() for field in _SENSITIVE_ARGUMENT_FIELDS)
+            else _redact_arguments(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_arguments(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_arguments(item) for item in value)
+    return value
