@@ -1,4 +1,6 @@
 # 虚拟环境
+
+- [虚拟环境创建](../../Python.md)
 - 进入（二选一）
 
 `myenv\Scripts\activate` # Windows
