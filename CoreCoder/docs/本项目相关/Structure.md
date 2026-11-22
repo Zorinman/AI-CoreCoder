@@ -142,7 +142,7 @@ class ToolCall:
 
 ### 3. `LLMResponse`
 
-定义位置：[llm.py](../CoreCoder/corecoder/llm.py)。这是 `LLM.chat()` 的统一返回值。
+定义位置：[llm.py](../../corecoder/llm.py)。这是 `LLM.chat()` 的统一返回值。
 
 | 字段                | 作用                                     |
 | ------------------- | ---------------------------------------- |
@@ -151,7 +151,10 @@ class ToolCall:
 | `prompt_tokens`     | 本次请求输入 Token 数                    |
 | `completion_tokens` | 本次请求输出 Token 数                    |
 
-`tool_calls` 使用 `field(default_factory=list)`，保证每个响应对象都有独立的空列表。
+`tool_calls` 使用 `list[ToolCall] = field(default_factory=list)`，采用默认工厂函数，每次创建 LLMResponse 对象时，都会调用 list()，为 tool_calls 创建一个新的空列表，**保证每个响应对象实例都有独立的空列表**。
+
+**问：为什么不直接写 = []**
+因为列表是可变对象。如果多个实例共享同一个列表，会导致相互影响。，因此需要使用 field(default_factory=list) 来确保每个实例都有自己的独立列表。
 
 它的 `message` 属性会将自身转为 OpenAI 格式的 assistant 消息字典，供 `Agent.messages` 保存。
 
@@ -170,7 +173,7 @@ class ToolCall:
 
 ### 5. `ModelChain` 与 `BudgetState`
 
-`ModelChain` 定义在 [fallback.py](../../corecoder/fallback.py)，是交给 `Agent` 的模型外观。CLI 通过 `ModelChain.from_config(config)` 用同一工厂构造主模型和有序备用模型；`backend` 选择 `LLM` 或 `LiteLLM`，`provider` 不参与该选择。模型链维护当前生效级别与熔断状态，并把总 Token 用量和已知模型的估算成本汇总到链级别。模型自身的三次重试仍由 `LLM` 或 `LiteLLM` 负责；某一级耗尽重试后，链才进入下一备用级别。
+`ModelChain` 定义在 [fallback.py](../../corecoder/fallback.py)，是交给 `Agent` 的模型外观。CLI 通过 `ModelChain.from_config(config)` 使用统一的模型创建入口，分别构造主模型和有序备用模型。；`backend` 选择 `LLM` 或 `LiteLLM`，`provider` 不参与该选择。模型链维护当前生效级别与熔断状态，并把总 Token 用量和已知模型的估算成本汇总到链级别。模型自身的三次重试仍由 `LLM` 或 `LiteLLM` 负责；某一级耗尽重试后，链才进入下一备用级别。
 
 `BudgetState` 定义在 [budget.py](../../corecoder/budget.py)，只保存单进程的可变硬预算上限。`ModelChain.from_config()` 默认根据 `Config.max_cost_usd` 创建它；成本超过上限时，链拒绝新的模型请求。未知价格的当前模型通过 `has_known_cost` 标识，预算检查对此放行。`/budget` 只能在当前进程中调高该上限。
 
@@ -178,19 +181,19 @@ class ToolCall:
 
 ### 1. `Agent`
 
-定义位置：[agent.py](../CoreCoder/corecoder/agent.py)。这是项目的核心协调对象，负责模型、工具和对话状态之间的调度。
+定义位置：[agent.py](../../corecoder/agent.py)。这是项目的核心协调对象，负责模型、工具和对话状态之间的调度。
 
-| 属性             | 作用                                                        |
-| ---------------- | ----------------------------------------------------------- |
-| `llm`            | 一个 `LLM` 或 `LiteLLM` 对象                                |
-| `tools`          | 可用的 `Tool` 对象列表；未显式传入时由该 Agent 创建默认实例 |
-| `_runtime_state` | 当前工作目录和已变更文件，仅由该 Agent 的状态型 Tool 共享   |
-| `changed_files`  | 已变更文件的只读快照，供 CLI 展示                           |
-| `_tool_by_name`  | `dict[str, Tool]`，将工具名映射到工具对象，便于快速查找     |
-| `messages`       | `list[dict]`，当前对话历史，不含系统提示词                  |
-| `context`        | `ContextManager`，负责压缩历史                              |
-| `max_rounds`     | 单次用户提问最多允许的“模型 -> 工具”循环次数                |
-| `_system`        | 根据当前工具列表生成的系统提示词                            |
+| 属性             | 作用                                                                                                |
+| ---------------- | --------------------------------------------------------------------------------------------------- |
+| `llm`            | 一个 `LLM` 或 `LiteLLM` 对象                                                                        |
+| `tools`          | 可用的 `Tool` 对象列表；未显式传入时由该 Agent 创建默认实例                                         |
+| `_runtime_state` | 保存当前工作目录和已变更文件快照，仅由该 Agent 的Tool内部共享状态                                   |
+| `changed_files`  | 已变更文件的只读快照，供 CLI 外部展示                                                               |
+| `_tool_by_name`  | `dict[str, Tool]`，将工具名映射到工具对象，便于 Agent根据模型返回的工具名称，快速找到对应的工具对象 |
+| `messages`       | `list[dict]`，当前对话历史，不含系统提示词                                                          |
+| `context`        | `ContextManager`，负责压缩历史                                                                      |
+| `max_rounds`     | 单次用户提问最多允许的“模型 -> 工具”循环次数                                                        |
+| `_system`        | 根据当前工具列表生成的系统提示词                                                                    |
 
 `Agent.chat()` 的逻辑是：追加用户消息 -> 请求模型 -> 若有 `ToolCall` 则执行工具并追加工具结果 -> 再请求模型 -> 返回最终文本。
 
@@ -223,7 +226,7 @@ class ToolCall:
 
 ### 4. 会话 JSON
 
-定义位置：[session.py](../CoreCoder/corecoder/session.py)。会话没有对应类，而是保存为 JSON 字典：
+定义位置：[session.py](../../corecoder/session.py)。会话没有对应类，而是保存为 JSON 字典：
 
 ```json
 {
@@ -240,7 +243,7 @@ class ToolCall:
 
 ### 1. `Tool` 抽象基类
 
-定义位置：[tools/base.py](../CoreCoder/corecoder/tools/base.py)。`Tool` 是所有工具的统一接口，不直接完成具体工作。
+定义位置：[tools/base.py](../../corecoder/tools/base.py)。`Tool` 是所有工具的统一接口，不直接完成具体工作。
 
 每个子类必须提供：
 
@@ -309,7 +312,7 @@ class ToolCall:
 
 ### 1. 数据类
 
-来源：[config.py](../../corecoder/config.py) 与 [llm.py](../../corecoder/llm.py)。以下省略校验与摘要方法，只保留字段结构。
+来源：[config.py](../../corecoder/config.py)、[llm.py](../../corecoder/llm.py) 与 [tools/runtime.py](../../corecoder/tools/runtime.py)。以下省略校验与摘要方法，只保留字段结构。
 
 ```python
 from __future__ import annotations
@@ -349,11 +352,17 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+
+
+@dataclass
+class ToolRuntimeState:
+    cwd: str | None = None
+    changed_files: set[str] = field(default_factory=set)
 ```
 
 ### 2. 运行协调对象的构造函数
 
-来源：[llm.py](../../corecoder/llm.py)、[fallback.py](../../corecoder/fallback.py)、[budget.py](../../corecoder/budget.py)、[agent.py](../../corecoder/agent.py)、[context.py](../../corecoder/context.py)。
+来源：[llm.py](../../corecoder/llm.py)、[fallback.py](../../corecoder/fallback.py)、[budget.py](../../corecoder/budget.py)、[agent.py](../../corecoder/agent.py)、[context.py](../../corecoder/context.py) 与 [tools/runtime.py](../../corecoder/tools/runtime.py)。
 
 ```python
 from typing import Any, Callable, Sequence
@@ -454,13 +463,20 @@ class Agent:
         self.context = ContextManager(max_tokens=max_context_tokens)
         self.max_rounds = max_rounds
         self._system = system_prompt(self.tools)
+
+    def _create_default_tools(self) -> list[Tool]:
+        state = self._runtime_state
+        return [
+            BashTool(state), ReadFileTool(), WriteFileTool(state),
+            EditFileTool(state), GlobTool(), GrepTool(), AgentTool(),
+        ]
 ```
 
 `Agent.__init__()` 后面还会遍历 `self.tools`，为每个 `AgentTool` 写入 `_parent_agent`。这部分是对象关联逻辑，不新增 `Agent` 自身字段。
 
 ### 3. `Tool` 基类定义
 
-来源：[tools/base.py](../CoreCoder/corecoder/tools/base.py)。
+来源：[tools/base.py](../../corecoder/tools/base.py)。
 
 ```python
 from abc import ABC, abstractmethod
@@ -489,7 +505,7 @@ class Tool(ABC):
 
 ### 4. 具体工具类的定义
 
-以下代码保留每个工具的类名、继承关系、工具名、参数 Schema 和 `execute()` 签名。方法体省略；它们分别位于 [`tools/`](../CoreCoder/corecoder/tools) 目录。
+以下代码保留每个工具的类名、继承关系、工具名、参数 Schema 和 `execute()` 签名。方法体省略；它们分别位于 [`tools/`](../../corecoder/tools) 目录。
 
 ```python
 class BashTool(Tool):
@@ -602,33 +618,37 @@ class AgentTool(Tool):
 
 所有具体工具还有 `description` 类属性。为避免与前面的功能表重复，未在此重复列出；`Tool.schema()` 会把 `name`、`description`、`parameters` 一起发送给模型。
 
-### 5. 无类数据结构的源码定义
 
-来源：[agent.py](../CoreCoder/corecoder/agent.py)、[tools/runtime.py](../CoreCoder/corecoder/tools/runtime.py)、[tools/grep.py](../CoreCoder/corecoder/tools/grep.py)、[llm.py](../CoreCoder/corecoder/llm.py)。
+
+### 5. 模块级辅助数据
+
+这些对象不属于某个 `Agent` 实例，而是由模块统一定义并复用的规则或常量。它们不是项目自定义的数据类，而是 Python 内置的集合、字典、列表或标准库路径对象。
+
+来源：[llm.py](../../corecoder/llm.py)、[tools/bash.py](../../corecoder/tools/bash.py)、[tools/grep.py](../../corecoder/tools/grep.py) 与 [session.py](../../corecoder/session.py)。
+
+以下仅列出代表性定义；完整规则和价格表请以对应源码为准。
 
 ```python
-@dataclass
-class ToolRuntimeState:
-    cwd: str | None = None
-    changed_files: set[str] = field(default_factory=set)
+from pathlib import Path
 
+_SKIP_DIRS: set[str] = {
+    ".git", "node_modules", "__pycache__", ".venv",
+    "venv", ".tox", "dist", "build",
+}
 
-def _create_default_tools(self) -> list[Tool]:
-    state = self._runtime_state
-    return [
-        BashTool(state), ReadFileTool(), WriteFileTool(state),
-        EditFileTool(state), GlobTool(), GrepTool(), AgentTool(),
-    ]
-
-_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", "dist", "build"}
-
-_PRICING = {
+_PRICING: dict[str, tuple[float, float]] = {
     "gpt-5.5": (5, 30),
     # 其余模型价格映射见 llm.py
 }
+
+_DANGEROUS_PATTERNS: list[tuple[str, str]] = [
+    # (危险命令的正则表达式, 风险说明)
+]
+
+SESSIONS_DIR: Path = Path.home() / ".corecoder" / "sessions"
 ```
 
-`_DANGEROUS_PATTERNS` 也是列表结构，元素形如 `(正则表达式, 风险说明)`；完整规则直接见 [bash.py](../CoreCoder/corecoder/tools/bash.py)。
+其中，`_PRICING` 保存模型价格，`_DANGEROUS_PATTERNS` 保存 Bash 安全规则，`_SKIP_DIRS` 保存递归搜索时需要跳过的目录，`SESSIONS_DIR` 保存会话文件的固定目录。完整规则分别见上述源码链接。
 
 # MCP 客户端结构
 
@@ -670,7 +690,7 @@ _PRICING = {
 
 # CoreCoder 命令行接口
 
-命令行接口分为启动参数和交互内置命令两部分。两者均由 [cli.py](../CoreCoder/corecoder/cli.py) 实现，但处理时机和职责不同。
+命令行接口分为启动参数和交互内置命令两部分。两者均由 [cli.py](../../corecoder/cli.py) 实现，但处理时机和职责不同。
 
 ## 1. 启动参数
 
