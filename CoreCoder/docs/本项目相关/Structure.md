@@ -2,31 +2,108 @@
 
 本文整理项目定义的 `class`、`@dataclass`，以及在多个模块之间传递或长期保存的关键 `dict`、`list`、`set`。不包含 Python 标准库和第三方库本身的类型，例如 `Path`、`OpenAI`、`Console`。
 
+
 ## 总览
 
+第一次阅读时，建议先按“启动”和“对话循环”两部分理解。
+
+### 1. 启动阶段：CLI 组装运行所需对象
+
 ```text
-Config -- ModelChain.from_config() -> ModelChain -> Agent
-                                      |-> 当前 LLM / LiteLLM
-                                      |-> BudgetState
-                                                   |-> messages: list[dict]
-                                                   |-> ContextManager
-                                                   |-> Tool 列表
+环境变量与 CLI 参数
+        |
+        v
+    Config
+        |
+        v
+ModelChain.from_config()
+        |
+        +--> 主模型：LLM 或 LiteLLM
+        |
+        +--> 备用模型：发生失败时按顺序尝试
+        |
+        +--> BudgetState：记录并检查模型调用预算
 
-用户 MCP 配置 -- load_mcp_config() -> McpServerConfig[] -> McpRuntime -> McpTool[]
-                                                                  |-> 作为 Agent.extra_tools 追加
+MCP 配置文件
+        |
+        v
+load_mcp_config()
+        |
+        v
+McpServerConfig[]
+        |
+        v
+McpRuntime.start()
+        |
+        v
+McpTool[]：把远程 MCP 工具包装成项目内部 Tool
 
-Agent.chat() -> ModelChain.chat() -> 当前 LLM.chat() -> LLMResponse
-                                                    -> ToolCall[] -> Tool.execute()
-                                                                  -> 工具结果写回 messages
+上述配置和运行时对象最终由 CLI 组装为：
+
+Agent
+├── llm：ModelChain
+├── tools：内置工具 + MCP 工具
+├── messages：当前会话的消息历史
+└── context：ContextManager，负责在消息过长时压缩上下文
 ```
 
-| 分类             | 结构                                                                                                     |
-| ---------------- | -------------------------------------------------------------------------------------------------------- |
-| 配置与模型通信   | `Config`、`ModelConfig`、`BudgetState`、`ModelChain`、`ToolCall`、`LLMResponse`、`LLM`、`LiteLLM`         |
-| Agent 运行状态   | `Agent`、`ContextManager`、Agent 运行状态、消息字典、会话 JSON                                            |
-| 工具体系         | `Tool`、`BashTool`、`ReadFileTool`、`WriteFileTool`、`EditFileTool`、`GlobTool`、`GrepTool`、`AgentTool` |
-| MCP 接入         | `McpServerConfig`、`McpStartupReport`、`McpRuntime`、`McpTool`                                      |
-| 模块辅助状态     | `_tool_by_name`、`_PRICING`、危险命令规则、搜索跳过目录和会话目录等                                      |
+其中，`BudgetState` 属于模型调用链；`messages`、工具列表和 `ContextManager` 属于 `Agent`。它们是并列的运行状态，不能理解为“`BudgetState` 包含这些对象”。
+
+### 2. 对话阶段：`Agent` 反复处理模型和工具
+
+```text
+用户输入
+    |
+    v
+Agent.chat()
+    |
+    v
+ModelChain.chat()
+    |
+    +--> 检查预算，并调用当前模型
+    |        |
+    |        +--> 当前模型失败：切换到下一个备用模型
+    |        |
+    |        v
+    |    LLM.chat() / LiteLLM.chat()
+    |        |
+    |        v
+    |    LLMResponse
+    |
+    +--> 没有 ToolCall
+    |        |
+    |        v
+    |    保存模型文本，返回给用户
+    |
+    +--> 包含一个或多个 ToolCall
+             |
+             v
+         Agent 找到对应 Tool 并执行
+             |
+             +--> 多个调用根据工具的并发安全性串行或并行执行
+             +--> AgentTool 会创建并运行子 Agent
+             +--> McpTool 会通过 McpRuntime 调用远程 MCP 工具
+             |
+             v
+         将工具结果写入 messages
+             |
+             v
+         回到 ModelChain.chat()，继续下一轮
+```
+
+### 3. 最重要的三个理解要点
+
+1. `ModelChain` 负责“选哪个模型、是否切换备用模型、是否超过预算”；
+2. `Agent` 是运行协调者：它保存消息历史，向模型提供工具定义，执行模型返回的工具调用，并决定是否继续下一轮。
+3. `LLMResponse` 一次只表示模型的一次返回结果：可能只有普通文本，也可能包含一个或多个 `ToolCall`。出现 `ToolCall` 时，对话不会立即结束，而是执行工具、写回结果后再次请求模型。
+
+| 分类           | 结构                                                                                                     |
+| -------------- | -------------------------------------------------------------------------------------------------------- |
+| 配置与模型通信 | `Config`、`ModelConfig`、`BudgetState`、`ModelChain`、`ToolCall`、`LLMResponse`、`LLM`、`LiteLLM`        |
+| Agent 运行状态 | `Agent`、`ContextManager`、Agent 运行状态、消息字典、会话 JSON                                           |
+| 工具体系       | `Tool`、`BashTool`、`ReadFileTool`、`WriteFileTool`、`EditFileTool`、`GlobTool`、`GrepTool`、`AgentTool` |
+| MCP 接入       | `McpServerConfig`、`McpStartupReport`、`McpRuntime`、`McpTool`                                           |
+| 模块辅助状态   | `_tool_by_name`、`_PRICING`、危险命令规则、搜索跳过目录和会话目录等                                      |
 
 ## 一、配置与模型通信
 
@@ -34,12 +111,12 @@ Agent.chat() -> ModelChain.chat() -> 当前 LLM.chat() -> LLMResponse
 
 定义位置：[config.py](../../corecoder/config.py)。这是一个不可变的 `@dataclass`，集中保存已经解析完成的启动配置。
 
-| 字段                 | 类型                        | 作用                                 |
-| -------------------- | --------------------------- | ------------------------------------ |
-| `primary`            | `ModelConfig`               | 已解析的主模型配置                   |
-| `fallbacks`          | `tuple[ModelConfig, ...]`   | 按顺序解析的备用模型配置             |
-| `max_context_tokens` | `int`                       | Agent 上下文上限                     |
-| `max_cost_usd`       | `float \| None`             | 单个进程的硬预算上限（美元）         |
+| 字段                 | 类型                      | 作用                         |
+| -------------------- | ------------------------- | ---------------------------- |
+| `primary`            | `ModelConfig`             | 已解析的主模型配置           |
+| `fallbacks`          | `tuple[ModelConfig, ...]` | 按顺序解析的备用模型配置     |
+| `max_context_tokens` | `int`                     | Agent 上下文上限             |
+| `max_cost_usd`       | `float \| None`           | 单个进程的硬预算上限（美元） |
 
 `Config.from_env()` 是环境变量配置的唯一入口。它只加载当前目录 `.env`，且不覆盖进程环境变量；随后解析 `CORECODER_PRIMARY_<FIELD>`、连续编号的 `CORECODER_FALLBACK_<N>_<FIELD>`、`CORECODER_MAX_CONTEXT_TOKENS` 与 `CORECODER_MAX_COST_USD`。每个已启用模型级别必须包含 `MODEL` 和显式 `API_KEY`，并可设置 `BACKEND`、`PROVIDER`、`BASE_URL`、`TEMPERATURE`、`MAX_TOKENS`。
 
@@ -103,17 +180,17 @@ class ToolCall:
 
 定义位置：[agent.py](../CoreCoder/corecoder/agent.py)。这是项目的核心协调对象，负责模型、工具和对话状态之间的调度。
 
-| 属性            | 作用                                                    |
-| --------------- | ------------------------------------------------------- |
-| `llm`           | 一个 `LLM` 或 `LiteLLM` 对象                            |
-| `tools`         | 可用的 `Tool` 对象列表；未显式传入时由该 Agent 创建默认实例 |
-| `_runtime_state` | 当前工作目录和已变更文件，仅由该 Agent 的状态型 Tool 共享 |
-| `changed_files` | 已变更文件的只读快照，供 CLI 展示                         |
-| `_tool_by_name` | `dict[str, Tool]`，将工具名映射到工具对象，便于快速查找 |
-| `messages`      | `list[dict]`，当前对话历史，不含系统提示词              |
-| `context`       | `ContextManager`，负责压缩历史                          |
-| `max_rounds`    | 单次用户提问最多允许的“模型 -> 工具”循环次数            |
-| `_system`       | 根据当前工具列表生成的系统提示词                        |
+| 属性             | 作用                                                        |
+| ---------------- | ----------------------------------------------------------- |
+| `llm`            | 一个 `LLM` 或 `LiteLLM` 对象                                |
+| `tools`          | 可用的 `Tool` 对象列表；未显式传入时由该 Agent 创建默认实例 |
+| `_runtime_state` | 当前工作目录和已变更文件，仅由该 Agent 的状态型 Tool 共享   |
+| `changed_files`  | 已变更文件的只读快照，供 CLI 展示                           |
+| `_tool_by_name`  | `dict[str, Tool]`，将工具名映射到工具对象，便于快速查找     |
+| `messages`       | `list[dict]`，当前对话历史，不含系统提示词                  |
+| `context`        | `ContextManager`，负责压缩历史                              |
+| `max_rounds`     | 单次用户提问最多允许的“模型 -> 工具”循环次数                |
+| `_system`        | 根据当前工具列表生成的系统提示词                            |
 
 `Agent.chat()` 的逻辑是：追加用户消息 -> 请求模型 -> 若有 `ToolCall` 则执行工具并追加工具结果 -> 再请求模型 -> 返回最终文本。
 
@@ -186,13 +263,13 @@ class ToolCall:
 以下 7 个类都继承 `Tool`，因此 `Agent` 可以以同一种方式调用它们。
 
 | 类              | 工具名       | 作用                                                       | `concurrency_safe` |
-| --------------- | ------------ | ---------------------------------------------------------- | ------------------- |
+| --------------- | ------------ | ---------------------------------------------------------- | ------------------ |
 | `BashTool`      | `bash`       | 执行 Shell 命令，检测部分危险命令、限制超时并截断过长输出  | `False`（默认）    |
-| `ReadFileTool`  | `read_file`  | 按行读取文本文件，支持起始行和最大行数                     | `True`              |
+| `ReadFileTool`  | `read_file`  | 按行读取文本文件，支持起始行和最大行数                     | `True`             |
 | `WriteFileTool` | `write_file` | 创建文件或完整覆盖文件内容                                 | `False`（默认）    |
 | `EditFileTool`  | `edit_file`  | 用唯一的 `old_string` 精确替换为 `new_string`，并返回 diff | `False`（默认）    |
-| `GlobTool`      | `glob`       | 按 glob 模式查找文件，最多返回 100 个结果                  | `True`              |
-| `GrepTool`      | `grep`       | 用正则搜索文件内容，跳过常见无关目录                       | `True`              |
+| `GlobTool`      | `glob`       | 按 glob 模式查找文件，最多返回 100 个结果                  | `True`             |
+| `GrepTool`      | `grep`       | 用正则搜索文件内容，跳过常见无关目录                       | `True`             |
 | `AgentTool`     | `agent`      | 创建独立上下文的子 Agent，完成子任务后返回摘要             | `False`（默认）    |
 
 `AgentTool` 比其他工具多一个 `_parent_agent` 引用。主 `Agent` 初始化时会注入自己；子 Agent 会复用父模型，但移除 `agent` 工具以禁止递归派生。`AgentTool` 保持 `concurrency_safe` 默认值——子 agent 内部可能触发写操作或消耗共享的降级/预算状态，不适合被当作并发安全工具处理。
@@ -201,15 +278,15 @@ class ToolCall:
 
 默认 Tool 与可变运行状态不在 Agent 之间共享。模块级数据只保存不依附于某个 Agent 生命周期的规则或常量。
 
-| 结构                  | 类型               | 定义位置            | 作用                                                      |
-| --------------------- | ------------------ | ------------------- | --------------------------------------------------------- |
-| `ToolRuntimeState`    | 数据类             | Agent 私有状态      | 保存该 Agent 的工作目录和已变更文件                      |
-| `_tool_by_name`       | `dict[str, Tool]`  | `Agent` 实例        | 由该 Agent 的 Tool 列表构建，按名称定位工具               |
-| `changed_files`       | `frozenset[str]`   | `Agent` 实例        | 返回当前 Agent 已变更文件的只读快照                       |
-| `_PRICING`            | `dict[str, tuple]` | `llm.py`            | 模型名到“每百万输入/输出 Token 单价”的映射，用于成本估算  |
-| `_DANGEROUS_PATTERNS` | `list[tuple]`      | `tools/bash.py`     | 正则表达式与风险说明的列表，用于拒绝部分高危 Shell 命令   |
-| `_SKIP_DIRS`          | `set[str]`         | `tools/grep.py`     | `grep` 递归搜索时忽略的目录名集合                         |
-| `SESSIONS_DIR`        | `Path`             | `session.py`        | 会话 JSON 的固定存储目录                                  |
+| 结构                  | 类型               | 定义位置        | 作用                                                     |
+| --------------------- | ------------------ | --------------- | -------------------------------------------------------- |
+| `ToolRuntimeState`    | 数据类             | Agent 私有状态  | 保存该 Agent 的工作目录和已变更文件                      |
+| `_tool_by_name`       | `dict[str, Tool]`  | `Agent` 实例    | 由该 Agent 的 Tool 列表构建，按名称定位工具              |
+| `changed_files`       | `frozenset[str]`   | `Agent` 实例    | 返回当前 Agent 已变更文件的只读快照                      |
+| `_PRICING`            | `dict[str, tuple]` | `llm.py`        | 模型名到“每百万输入/输出 Token 单价”的映射，用于成本估算 |
+| `_DANGEROUS_PATTERNS` | `list[tuple]`      | `tools/bash.py` | 正则表达式与风险说明的列表，用于拒绝部分高危 Shell 命令  |
+| `_SKIP_DIRS`          | `set[str]`         | `tools/grep.py` | `grep` 递归搜索时忽略的目录名集合                        |
+| `SESSIONS_DIR`        | `Path`             | `session.py`    | 会话 JSON 的固定存储目录                                 |
 
 `Agent` 执行一批 `tool_calls` 时，还会调用 `_segment_tool_calls()` 按
 `Tool.concurrency_safe` 把它们分成若干 `(is_safe, calls)` 段——这是一个只
@@ -559,12 +636,12 @@ _PRICING = {
 
 ## 1. 数据结构与职责
 
-| 结构 | 类型 | 关键字段或状态 | 职责 |
-| --- | --- | --- | --- |
-| `McpServerConfig` | 不可变 `@dataclass` | `key`、`command`、`args`、`env`、`url` | 表示已经校验的 stdio 或 Streamable HTTP Server 配置。 |
-| `McpStartupReport` | 不可变 `@dataclass` | `server_key`、`status`、`tool_count`、`error` | 保存单个 Server 的安全启动摘要，供 CLI 显示。 |
-| `McpRuntime` | 类 | `servers`、`tools`、`startup_reports`、后台事件循环、会话组和退出栈 | 管理连接、工具发现、调用、超时和清理。 |
-| `McpTool` | `Tool` 子类 | 运行时引用、Server 键、远程工具名、本地工具名、Schema | 将异步 MCP Tool 适配成 Agent 的同步工具接口。 |
+| 结构               | 类型                | 关键字段或状态                                                      | 职责                                                  |
+| ------------------ | ------------------- | ------------------------------------------------------------------- | ----------------------------------------------------- |
+| `McpServerConfig`  | 不可变 `@dataclass` | `key`、`command`、`args`、`env`、`url`                              | 表示已经校验的 stdio 或 Streamable HTTP Server 配置。 |
+| `McpStartupReport` | 不可变 `@dataclass` | `server_key`、`status`、`tool_count`、`error`                       | 保存单个 Server 的安全启动摘要，供 CLI 显示。         |
+| `McpRuntime`       | 类                  | `servers`、`tools`、`startup_reports`、后台事件循环、会话组和退出栈 | 管理连接、工具发现、调用、超时和清理。                |
+| `McpTool`          | `Tool` 子类         | 运行时引用、Server 键、远程工具名、本地工具名、Schema               | 将异步 MCP Tool 适配成 Agent 的同步工具接口。         |
 
 `McpServerConfig` 的 `url` 与 `command` 是互斥的传输入口：`url` 表示 Streamable HTTP；`command`、`args` 和 `env` 表示 stdio。配置解析后的结构不存入全局 `Config`，而由 CLI 在启动阶段直接交给 `McpRuntime`。
 
@@ -599,16 +676,16 @@ _PRICING = {
 
 `_parse_args()` 使用 `argparse` 在 `main()` 开始时解析启动参数。参数只解析一次，用于创建或恢复运行环境；随后才进入单次运行模式或交互 REPL。
 
-| 参数 | 作用 | 生效方式 |
-| --- | --- | --- |
-| `-m`, `--model` | 指定主模型名 | 在构造 `Config.primary` 前覆盖 `CORECODER_PRIMARY_MODEL`。 |
-| `--base-url` | 指定主模型 API 地址 | 在构造 `Config.primary` 前覆盖 `CORECODER_PRIMARY_BASE_URL`。 |
-| `--api-key` | 指定主模型 API Key | 在构造 `Config.primary` 前覆盖 `CORECODER_PRIMARY_API_KEY`。 |
-| `-p`, `--prompt` | 提供单次提示词 | 调用一次 `Agent.chat()` 后退出，不进入交互 REPL。 |
-| `-r`, `--resume ID` | 恢复已保存会话 | 加载 `messages` 和显式运行时模型覆盖；指定 `--model` 时优先使用该参数。 |
-| `--mcp-config PATH` | 为本次启动指定 MCP 配置文件 | 覆盖默认 `~/.corecoder/mcp.json`；与 `--no-mcp` 互斥。 |
-| `--no-mcp` | 禁用本次启动的 MCP | 跳过 MCP 配置发现和外部 Server 连接；与 `--mcp-config` 互斥。 |
-| `-v`, `--version` | 显示版本 | 由 `argparse` 输出版本并结束程序。 |
+| 参数                | 作用                        | 生效方式                                                                |
+| ------------------- | --------------------------- | ----------------------------------------------------------------------- |
+| `-m`, `--model`     | 指定主模型名                | 在构造 `Config.primary` 前覆盖 `CORECODER_PRIMARY_MODEL`。              |
+| `--base-url`        | 指定主模型 API 地址         | 在构造 `Config.primary` 前覆盖 `CORECODER_PRIMARY_BASE_URL`。           |
+| `--api-key`         | 指定主模型 API Key          | 在构造 `Config.primary` 前覆盖 `CORECODER_PRIMARY_API_KEY`。            |
+| `-p`, `--prompt`    | 提供单次提示词              | 调用一次 `Agent.chat()` 后退出，不进入交互 REPL。                       |
+| `-r`, `--resume ID` | 恢复已保存会话              | 加载 `messages` 和显式运行时模型覆盖；指定 `--model` 时优先使用该参数。 |
+| `--mcp-config PATH` | 为本次启动指定 MCP 配置文件 | 覆盖默认 `~/.corecoder/mcp.json`；与 `--no-mcp` 互斥。                  |
+| `--no-mcp`          | 禁用本次启动的 MCP          | 跳过 MCP 配置发现和外部 Server 连接；与 `--mcp-config` 互斥。           |
+| `-v`, `--version`   | 显示版本                    | 由 `argparse` 输出版本并结束程序。                                      |
 
 例如，`corecoder --model gpt-5.4 --resume session_123` 在启动时设置模型并恢复会话。
 
@@ -616,21 +693,21 @@ _PRICING = {
 
 程序未使用 `--prompt` 时会进入 `_repl()`。用户在 `You >` 提示符中输入以下命令，由 REPL 在调用 `Agent.chat()` 前直接处理。
 
-| 输入 | 作用 |
-| --- | --- |
-| `/help` | 显示交互命令和输入快捷键。 |
-| `/mcp` | 显示当前已连接的 MCP Server 及每个 Server 的工具数量。 |
-| `/reset` | 清空当前对话历史。 |
-| `/model` | 显示当前模型。 |
-| `/model <name>` | 在当前进程中切换模型。 |
-| `/tokens` | 显示累计输入、输出 Token 及可用时的费用估算。 |
-| `/budget` | 显示当前硬预算上限；未配置时显示无限制。 |
-| `/budget <usd>` | 将硬预算上限调高为指定的非负美元金额。 |
-| `/compact` | 对当前对话历史执行上下文压缩，并显示压缩前后的估算 Token 数。 |
-| `/diff` | 显示当前会话修改过的文件。 |
-| `/save` | 将当前会话保存到磁盘。 |
-| `/sessions` | 列出已保存会话。 |
-| `quit`、`exit`、`/quit`、`/exit` | 退出交互 REPL。 |
+| 输入                             | 作用                                                          |
+| -------------------------------- | ------------------------------------------------------------- |
+| `/help`                          | 显示交互命令和输入快捷键。                                    |
+| `/mcp`                           | 显示当前已连接的 MCP Server 及每个 Server 的工具数量。        |
+| `/reset`                         | 清空当前对话历史。                                            |
+| `/model`                         | 显示当前模型。                                                |
+| `/model <name>`                  | 在当前进程中切换模型。                                        |
+| `/tokens`                        | 显示累计输入、输出 Token 及可用时的费用估算。                 |
+| `/budget`                        | 显示当前硬预算上限；未配置时显示无限制。                      |
+| `/budget <usd>`                  | 将硬预算上限调高为指定的非负美元金额。                        |
+| `/compact`                       | 对当前对话历史执行上下文压缩，并显示压缩前后的估算 Token 数。 |
+| `/diff`                          | 显示当前会话修改过的文件。                                    |
+| `/save`                          | 将当前会话保存到磁盘。                                        |
+| `/sessions`                      | 列出已保存会话。                                              |
+| `quit`、`exit`、`/quit`、`/exit` | 退出交互 REPL。                                               |
 
 未被识别且以 `/` 开头的输入会显示未知命令提示，不会发送给模型。普通文本输入才会作为用户消息传入 `Agent.chat()`。
 
@@ -666,21 +743,21 @@ flowchart LR
     CLI --> U
 ```
 
-| 节点            | 功能                                            |
-| --------------- | ----------------------------------------------- |
-| 用户            | 提交问题并接收最终回复。                        |
-| CLI             | 读取模型配置与用户 MCP 配置，创建模型链和 Agent，接收输入并显示结果。 |
-| Config          | 集中解析主模型、备用级别和硬预算。              |
-| 用户 MCP 配置   | 用户明确授权的 `mcp.json`；不由项目目录、`.env` 或会话决定。 |
-| McpRuntime      | 连接 MCP Server、发现工具，并在后台事件循环中管理调用与关闭。 |
-| McpTool[]       | 经命名空间隔离的外部 Tool 适配器，作为 `extra_tools` 追加给 Agent。 |
-| ModelChain + BudgetState | 在预算允许时选择当前模型，并维护降级与熔断状态。 |
-| Agent           | 管理消息历史，经模型链发起请求，分派 Tool 并控制循环。 |
-| 当前 LLM 抽象层 | 统一封装当前模型后端的调用方式。                |
-| OpenAI 兼容接口 | 调用 OpenAI 或兼容 OpenAI 协议的模型服务。      |
-| LiteLLM 接口    | 通过 LiteLLM 调用其他模型供应商。               |
-| LLMResponse     | 保存 LLM 返回的文本、ToolCall 和 Token 信息。   |
-| Tool 集合       | 执行内置文件、命令、搜索、子 Agent 或 MCP 外部操作。 |
+| 节点                     | 功能                                                                  |
+| ------------------------ | --------------------------------------------------------------------- |
+| 用户                     | 提交问题并接收最终回复。                                              |
+| CLI                      | 读取模型配置与用户 MCP 配置，创建模型链和 Agent，接收输入并显示结果。 |
+| Config                   | 集中解析主模型、备用级别和硬预算。                                    |
+| 用户 MCP 配置            | 用户明确授权的 `mcp.json`；不由项目目录、`.env` 或会话决定。          |
+| McpRuntime               | 连接 MCP Server、发现工具，并在后台事件循环中管理调用与关闭。         |
+| McpTool[]                | 经命名空间隔离的外部 Tool 适配器，作为 `extra_tools` 追加给 Agent。   |
+| ModelChain + BudgetState | 在预算允许时选择当前模型，并维护降级与熔断状态。                      |
+| Agent                    | 管理消息历史，经模型链发起请求，分派 Tool 并控制循环。                |
+| 当前 LLM 抽象层          | 统一封装当前模型后端的调用方式。                                      |
+| OpenAI 兼容接口          | 调用 OpenAI 或兼容 OpenAI 协议的模型服务。                            |
+| LiteLLM 接口             | 通过 LiteLLM 调用其他模型供应商。                                     |
+| LLMResponse              | 保存 LLM 返回的文本、ToolCall 和 Token 信息。                         |
+| Tool 集合                | 执行内置文件、命令、搜索、子 Agent 或 MCP 外部操作。                  |
 
 ## 2. 调用流程图
 
