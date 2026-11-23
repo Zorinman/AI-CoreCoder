@@ -105,6 +105,66 @@ ModelChain.chat()
 | MCP 接入       | `McpServerConfig`、`McpStartupReport`、`McpRuntime`、`McpTool`                                           |
 | 模块辅助状态   | `_tool_by_name`、`_PRICING`、危险命令规则、搜索跳过目录和会话目录等                                      |
 
+
+
+## Agent请求外部模型的参数构造与响应解析流程
+构造涉及 [agent.py](../../corecoder/agent.py)的Agent.chat()以及 [llm.py](../../corecoder/llm.py) 的LLM.chat()。`self.llm.chat(...) `调用接口层处理传入参数，而  接口层`LLM.chat()`根据传入参数**构造发送给外部模型的请求数据**
+总体调用流程如下：
+```txt
+Agent.chat()中的self.llm.chat(...)
+    ↓
+llm.chat()构造 params
+    ↓
+_call_with_retry使用客户端self.client对外部模型API发起调用
+    ↓
+LLM接口层解析拼接流式响应
+    ↓
+返回内容并保存到 resp - LLMResponse类型，包含resp.tool_calls和resp.message等一系列属性。
+```
+
+`Agent.chat()`中调用`self.llm.chat()`，传入参数`messages`、`tools`和`on_token`，接受类似为LLMResponse的resp。
+### Agent.chat()中调用self.llm.chat()
+```python
+resp = self.llm.chat(
+    messages=self._full_messages(),
+    tools=self._tool_schemas(),
+    on_token=on_token,
+)
+```
+### llm.chat()
+
+llm.chat()中构造请求参数params如下：
+```python
+    def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        on_token=None,
+    ) -> LLMResponse:
+        params: dict = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            **self.extra,
+        }
+        if tools:
+            params["tools"] = tools
+        .....
+        .....
+        response = self._decode_stream(stream, on_token)
+```
+**on_token**不会放入外部请求，它不是模型 API 的请求参数。它在本地解析流式响应时使用
+```python
+response = self._decode_stream(stream, on_token)
+```
+### 客户端初始化与请求
+**客户端在LLM接口层完成初始化以及请求**
+`llm.py`
+ ```python
+ self.client = OpenAI(api_key=api_key, base_url=base_url)
+ ```
+在`llm.chat()` → `_call_with_retry()` → `self.client.chat.completions.create(**params)`中会把构造好的消息、工具定义、模型名称等参数发送给外部模型，并返回流式响应对象
+
 ## 一、配置与模型通信
 
 ### 1. `Config`
