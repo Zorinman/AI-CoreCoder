@@ -23,8 +23,8 @@ if TYPE_CHECKING:
 
 def _approx_tokens(text: str) -> int:
     """Rough token count, roughly 3 chars per token for mixed en/zh content."""
-    return len(text) // 3
-
+    return len(text) // 3   # 3字符/token
+ #OpenAI 给常见英文的经验值是约 4 字符/token；DeepSeek 则给出英文约 3字符/token、中文约 2字符/token
 
 def estimate_tokens(messages: list[dict]) -> int:
     total = 0

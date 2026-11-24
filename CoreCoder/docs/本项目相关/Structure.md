@@ -157,6 +157,9 @@ llm.chat()中构造请求参数params如下：
 ```python
 response = self._decode_stream(stream, on_token)
 ```
+本系统中用户的请求和模型的响应都会保存在`message`对象中
+`Agent.chat()` 把用户输入记为 `user `消息，把模型的回复记为 `assistant` 消息。工具调用也记在 `assistant` 消息里，工具结果另存为 `tool` 消息
+
 ### 客户端初始化与请求
 **客户端在LLM接口层完成初始化以及请求**
 `llm.py`
