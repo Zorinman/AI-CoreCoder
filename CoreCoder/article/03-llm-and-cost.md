@@ -219,12 +219,3 @@ CORECODER_FALLBACK_1_MAX_TOKENS=4096
 
 备用编号必须从 1 连续递增；每一级的 `MODEL` 与 `API_KEY` 必填，其他字段也属于该级自己的配置，`BASE_URL` 可以省略。`BACKEND` 只能是 `openai_compatible` 或 `litellm`，`PROVIDER` 只是非空的供应商标识。CLI 的 `--model`、`--api-key`、`--base-url` 只覆盖主模型对应字段；其后才是进程环境变量、当前目录 `.env` 和默认生成参数。旧的 `OPENAI_*`、`CORECODER_MODEL` 等变量会明确报错并给出迁移目标，不再悄悄兼容。`ModelConfig` 和外层 `Config` 都是不可变快照：前者描述单个模型，后者保存主模型、备用链、上下文上限和预算上限。`ModelChain.from_config()` 用同一条路径构造主备模型，因而温度、最大输出等参数不会在降级时丢失；运行时的当前级别、熔断、预算和模型名覆盖由模型链与 `BudgetState` 保存，不回写启动配置。`.env.example` 列出全部正式字段，备用模型块默认注释，复制模板后不会意外启用不完整的备用级别。
 
-## 这一篇带走什么
-
-- 「大多数 provider 都兼容 OpenAI 接口」这个赌注，让整个 provider 层薄到只是 openai SDK 的一层包装；切换兼容 provider 主要是改主模型配置，非兼容 provider 则切到 LiteLLM 后端。
-- 流式输出里，工具调用的参数是分片到达的，得按 index 累加再 `json.loads`，还要对坏数据优雅降级。
-- 重试该放在 provider 层，不该塞进主循环。指数退避只重试瞬时故障和 5xx，绝不重试 4xx。
-- CoreCoder 结合 provider 层的退避重试、按顺序的降级链和进程级硬预算。降级路由与 provider 无关，未知价格的模型采用放行策略。
-- 成本估算宁可对未知模型返回 `None`，也不编一个假精确的数字。诚实比好看重要。
-
-下一篇，我们面对 agent 最硬的那道物理约束：上下文窗口就这么大，一个长任务怎么塞得下。
